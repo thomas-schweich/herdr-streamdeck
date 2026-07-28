@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: lint and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+      - run: sudo apt-get update && sudo apt-get install -y libhidapi-libusb0
+      - run: uv sync --frozen
+      - run: uv run ruff check --output-format=github .
+      - run: uv run ruff format --check .
+      # Strict, and covering scripts/ as well as src/ and tests/.
+      - run: uv run mypy
+
+  test:
+    name: test ${{ matrix.os }} py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+
+      # python-elgato-streamdeck ships only bindings; the native hidapi library
+      # is a separate system package. Without it `import StreamDeck` fails at
+      # the point it tries to load a backend, not at import of our own code.
+      - name: Install hidapi (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libhidapi-libusb0
+      - name: Install hidapi (macOS)
+        if: runner.os == 'macOS'
+        run: brew install hidapi
+
+      - run: uv sync --frozen
+
+      # No Stream Deck and no herdr server on a runner. The 6 tests in
+      # test_integration.py skip themselves when no socket exists; the other 47
+      # run everywhere. Fail if that ever silently becomes "everything skipped".
+      - run: uv run pytest -v
+
+      - name: Package imports with the real native library
+        run: |
+          uv run python -c "
+          import herdr_streamdeck as h
+          from herdr_streamdeck.deck import StreamDeckSurface
+          from StreamDeck.DeviceManager import DeviceManager
+          print('herdr_streamdeck', h.__version__)
+          print('decks visible:', len(DeviceManager().enumerate()))
+          "
+
+      # The CLI must at least start and parse args on both platforms.
+      - run: uv run herdr-streamdeck --help
+
+      # --probe exits non-zero with no device attached, which is correct.
+      # Assert it fails *for that reason* rather than crashing.
+      - name: Probe reports no device cleanly
+        shell: bash
+        run: |
+          set +e
+          output=$(uv run herdr-streamdeck --probe 2>&1)
+          code=$?
+          echo "$output"
+          if [ $code -eq 0 ]; then
+            echo "::warning::a Stream Deck appears to be attached to this runner"
+            exit 0
+          fi
+          echo "$output" | grep -qiE 'no stream deck found|enumeration failed' || {
+            echo "::error::--probe failed for an unexpected reason"; exit 1; }
+
+  scripts:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # shellcheck is preinstalled on the Ubuntu runner image.
+      # These scripts are never linted locally, so this is their only check.
+      - run: shellcheck --severity=warning scripts/*.sh
+      - name: Scripts are executable
+        run: |
+          for f in scripts/*.sh scripts/*.py; do
+            [ -x "$f" ] || { echo "::error file=$f::not executable"; exit 1; }
+          done
+
+  powershell:
+    name: powershell
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Parse setup-windows.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "scripts/setup-windows.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object {
+              Write-Output "::error file=scripts/setup-windows.ps1,line=$($_.Extent.StartLineNumber)::$($_.Message)"
+            }
+            exit 1
+          }
+          Write-Output "parsed with no errors"
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          # Write-Host is intentional for human-facing setup output, and the
+          # elevated-launch path legitimately builds an encoded command.
+          $results = Invoke-ScriptAnalyzer -Path scripts/setup-windows.ps1 `
+            -Severity Error,Warning `
+            -ExcludeRule PSAvoidUsingWriteHost,PSUseShouldProcessForStateChangingFunctions
+          if ($results) {
+            $results | Format-Table -AutoSize | Out-String | Write-Output
+            if ($results | Where-Object Severity -eq 'Error') { exit 1 }
+          }
+          Write-Output "no analyzer errors"
+
+  package:
+    name: package and manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      # Catches uv.lock drifting from pyproject.toml.
+      - run: uv lock --check
+      - run: uv build
+
+      # herdr-plugin.toml is not exercised by any test, but a typo here breaks
+      # `herdr plugin install` for every user. Validate it structurally.
+      - name: Validate herdr-plugin.toml
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import sys, tomllib
+
+          manifest = tomllib.load(open("herdr-plugin.toml", "rb"))
+          problems = []
+
+          for key in ("id", "name", "version", "min_herdr_version"):
+              if not manifest.get(key):
+                  problems.append(f"missing required key: {key}")
+
+          # An empty platforms array is rejected by herdr; omit it instead.
+          platforms = manifest.get("platforms")
+          if platforms is not None and not platforms:
+              problems.append("platforms must not be empty; omit the key instead")
+          for platform in platforms or []:
+              if platform not in {"linux", "macos", "windows"}:
+                  problems.append(f"unknown platform: {platform}")
+
+          # Every command is argv, never a shell string.
+          for section in ("build", "startup", "actions", "events", "panes"):
+              for index, entry in enumerate(manifest.get(section, [])):
+                  command = entry.get("command")
+                  if not isinstance(command, list) or not command:
+                      problems.append(f"{section}[{index}].command must be a non-empty array")
+                  elif not all(isinstance(part, str) and part for part in command):
+                      problems.append(f"{section}[{index}].command entries must be non-empty strings")
+
+          for action in manifest.get("actions", []):
+              for key in ("id", "title"):
+                  if not action.get(key):
+                      problems.append(f"action missing {key}")
+
+          version = manifest.get("version")
+          pyproject = tomllib.load(open("pyproject.toml", "rb"))
+          project_version = pyproject["project"]["version"]
+          if version != project_version:
+              problems.append(
+                  f"version {version!r} does not match pyproject {project_version!r}"
+              )
+
+          if problems:
+              for problem in problems:
+                  print(f"::error file=herdr-plugin.toml::{problem}")
+              sys.exit(1)
+          print(f"manifest ok: {manifest['id']} {version}")
+          PY

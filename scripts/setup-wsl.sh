@@ -163,7 +163,9 @@ verify() {
         grep -qi "^HID_ID=.*:0000${vid_upper}:" "$sysdev/device/uevent" || continue
 
         found=1
-        local node="/dev/$(basename "$sysdev")"
+        # Parameter expansion rather than $(basename ...): no subshell, and no
+        # command substitution inside `local`, which would mask its exit status.
+        local node="/dev/${sysdev##*/}"
         local perms; perms=$(stat -c '%U:%G %a' "$node" 2>/dev/null || echo "missing")
         if [[ "$perms" == *plugdev* ]]; then
             ok "$node -> $perms"
