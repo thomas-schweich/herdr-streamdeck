@@ -8,10 +8,15 @@ Two threading notes drive the structure here:
 * The Stream Deck library delivers key callbacks on its own reader thread, so
   presses are handed to the event loop with ``call_soon_threadsafe`` rather
   than touched directly.
-* Agent status arrives on the *global* ``pane.updated`` event, which carries a
-  full pane object. That avoids maintaining a per-pane
-  ``pane.agent_status_changed`` subscription per pane and re-subscribing as
-  panes come and go.
+* Agent status arrives **only** on ``pane.agent_status_changed``, which is
+  pane-scoped. ``pane.updated`` carries an ``agent_status`` field in its
+  payload but does not fire when status changes -- verified by driving
+  transitions with ``pane.report_agent`` and watching both. Relying on the
+  global event meant status only refreshed on the 60s reconcile.
+
+  So a subscription is held per pane, rebuilt whenever the pane set changes.
+  That needs a new connection each time (see HerdrSession.resubscribe), which
+  is why it is done on restructure rather than per event.
 
 Layout mirrors herdr rather than storing anything: columns follow
 ``workspace.list`` (sidebar order) and rows follow ``pane.list`` (a depth-first
@@ -28,6 +33,7 @@ import contextlib
 import logging
 import signal
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
@@ -104,6 +110,8 @@ class HerdrLike(Protocol):
     async def snapshot(self) -> JSONObject: ...
 
     async def subscribe(self, subscriptions: Sequence[JSONObject]) -> None: ...
+
+    async def resubscribe(self, subscriptions: Sequence[JSONObject]) -> None: ...
 
     def events(self) -> AsyncIterator[Event]: ...
 
@@ -357,6 +365,20 @@ class DeckController:
 
         return order, focused
 
+    def _subscription_set(self) -> list[JSONObject]:
+        """Global subscriptions plus one status subscription per live pane."""
+        subs = [subscription(kind) for kind in SUBSCRIPTIONS]
+        subs.extend(
+            subscription("pane.agent_status_changed", pane_id=pane_id)
+            for pane_id in self._panes
+        )
+        return subs
+
+    async def run_subscriptions(self) -> None:
+        """Establish the initial subscription set (globals plus per pane)."""
+        await self.prime()
+        await self._client.subscribe(self._subscription_set())
+
     async def prime(self) -> None:
         """Re-read herdr's arrangement. Snapshot and listing are the truth.
 
@@ -367,11 +389,16 @@ class DeckController:
         order, focused = await self.read_order()
         snapshot = await self._client.snapshot()
 
+        before = set(self._panes)
         self._panes = {}
         for record in _iter_panes(snapshot):
             self._upsert(record)
         self._order = order
         self._focused_workspace = focused
+
+        # Status subscriptions are per pane, so the set has to follow the panes.
+        if set(self._panes) != before:
+            await self._client.resubscribe(self._subscription_set())
 
         self.repaint()
 
@@ -387,6 +414,17 @@ class DeckController:
             self._dirty.set()
             return
 
+        if event.kind == "pane.agent_status_changed":
+            # The only event that fires on a status transition.
+            pane_id = event.data.get("pane_id")
+            status = event.data.get("agent_status")
+            if isinstance(pane_id, str) and isinstance(status, str):
+                existing = self._panes.get(pane_id)
+                if existing is not None and existing.status != status:
+                    self._panes[pane_id] = replace(existing, status=status)
+                    self._dirty.set()
+            return
+
         if event.kind == "pane.updated":
             record = event.data.get("pane")
             if isinstance(record, dict) and self._upsert(record):
@@ -400,7 +438,7 @@ class DeckController:
         # Order matters: subscribe first so no live change is missed, then
         # throw away the replayed backlog, then snapshot. Snapshotting before
         # the backlog drains would just be overwritten by stale events.
-        await self._client.subscribe([subscription(kind) for kind in SUBSCRIPTIONS])
+        await self._client.subscribe(self._subscription_set())
         await self.drain_replay()
         await self.prime()
 

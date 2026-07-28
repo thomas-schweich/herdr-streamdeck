@@ -14,6 +14,7 @@ import pytest
 
 from herdr_streamdeck.animation import (
     GAMMA,
+    LEGIBLE_FLOOR,
     LEVELS,
     Animation,
     Waveform,
@@ -31,8 +32,9 @@ BLOCKED = animation_for("blocked")
 
 
 def test_each_status_gets_the_requested_behaviour() -> None:
-    assert animation_for("idle").waveform is Waveform.STEADY
-    assert animation_for("idle").high < 0.5, "idle should be dim"
+    idle = animation_for("idle")
+    assert idle.waveform is Waveform.STEADY
+    assert idle.high < 1.0, "idle should be dimmer than done"
 
     assert animation_for("working").waveform is Waveform.PULSE
 
@@ -42,13 +44,36 @@ def test_each_status_gets_the_requested_behaviour() -> None:
 
     blocked = animation_for("blocked")
     assert blocked.waveform is Waveform.BLINK
-    assert (blocked.low, blocked.high) == (0.5, 1.0), "blink between 50% and 100%"
+    assert blocked.high == 1.0
+    assert blocked.low < blocked.high, "blocked should swing, not sit"
+
+
+def test_everything_meant_to_be_read_stays_legible() -> None:
+    """Below the measured floor a mark cannot be read, so nothing readable
+    may sit there. LEGIBLE_FLOOR came from a ramp shown on the device."""
+    for status in ("idle", "working", "done", "blocked"):
+        animation = animation_for(status)
+        assert animation.low >= LEGIBLE_FLOOR, f"{status} dips below legibility"
+        assert animation.high >= LEGIBLE_FLOOR
+
+
+def test_working_never_looks_dimmer_than_idle() -> None:
+    """Otherwise the bottom of each breath inverts the meaning."""
+    assert animation_for("working").low >= animation_for("idle").high
+
+
+def test_blocked_swings_wider_than_working_pulses() -> None:
+    """Blocked needs to grab attention that a working pulse does not."""
+    working = animation_for("working")
+    blocked = animation_for("blocked")
+    assert (blocked.high - blocked.low) > (working.high - working.low)
 
 
 def test_unknown_status_is_steady_and_dim() -> None:
+    """No agent means nothing to read, so it may sit below the floor."""
     unknown = animation_for("nonsense")
     assert unknown.waveform is Waveform.STEADY
-    assert unknown.high < 0.5
+    assert unknown.high < LEGIBLE_FLOOR
 
 
 def test_working_and_blocked_use_different_periods() -> None:

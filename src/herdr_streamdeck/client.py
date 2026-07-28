@@ -303,7 +303,10 @@ class HerdrSession:
         event_queue_size: int = DEFAULT_EVENT_QUEUE_SIZE,
     ) -> None:
         self.socket_path = socket_path or default_socket_path()
+        self._event_queue_size = event_queue_size
         self._stream = HerdrClient(self.socket_path, event_queue_size=event_queue_size)
+        self._subscriptions: list[JSONObject] = []
+        self._swapping = False
 
     @property
     def dropped_events(self) -> int:
@@ -342,10 +345,42 @@ class HerdrSession:
         return await self.request("session.snapshot")
 
     async def subscribe(self, subscriptions: Sequence[JSONObject]) -> None:
-        await self._stream.subscribe(subscriptions)
+        self._subscriptions = list(subscriptions)
+        await self._stream.subscribe(self._subscriptions)
 
-    def events(self) -> AsyncIterator[Event]:
-        return self._stream.events()
+    async def resubscribe(self, subscriptions: Sequence[JSONObject]) -> None:
+        """Replace the subscription set, reopening the stream to do it.
+
+        Pane-scoped subscriptions cannot be added to a live stream: a
+        connection serves exactly one request, and ``events.subscribe`` turns
+        it into an event-only stream that accepts nothing more. So changing the
+        set means a new connection.
+
+        :meth:`events` survives the swap -- it must, because the daemon treats
+        a closed stream as "herdr is gone" and shuts down.
+        """
+        wanted = list(subscriptions)
+        if wanted == self._subscriptions:
+            return
+        self._subscriptions = wanted
+        self._swapping = True
+        await self._stream.close()
+
+    async def events(self) -> AsyncIterator[Event]:
+        """Yield events, transparently reopening the stream on resubscribe."""
+        while True:
+            async for event in self._stream.events():
+                yield event
+
+            if not self._swapping:
+                return  # the server really did go away
+
+            self._swapping = False
+            self._stream = HerdrClient(
+                self.socket_path, event_queue_size=self._event_queue_size
+            )
+            await self._stream.connect()
+            await self._stream.subscribe(self._subscriptions)
 
 
 async def request_once(

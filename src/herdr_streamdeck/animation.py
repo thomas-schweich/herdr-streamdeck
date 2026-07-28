@@ -33,7 +33,20 @@ LEVELS = 48
 small enough that the prebuffer stays cheap: 48 x ~730-byte JPEGs per key."""
 
 GAMMA = 2.2
-"""Display gamma. Perceptual level p is produced by multiplying by p**GAMMA."""
+"""Display gamma. Perceptual level p is produced by multiplying by p**GAMMA.
+
+Validated on hardware: a 15-key ramp evenly spaced in perceptual space read as
+evenly spaced to the eye, so this exponent matches the panel. If a ramp ever
+looks bunched at one end, this is the number to change -- not the levels."""
+
+LEGIBLE_FLOOR = 0.66
+"""Dimmest level at which a mark stays readable.
+
+Measured, not guessed: a 15-key ramp from 0.20 to 1.00 was shown on an MK.2 at
+60% device brightness in a dimly lit room, and key 9 (0.657) was the dimmest
+still comfortably legible. Everything meant to be *read* sits at or above this;
+below it a key is effectively off. Re-measure if the device brightness setting
+changes materially, since the floor moves with it."""
 
 
 class Waveform(StrEnum):
@@ -80,13 +93,22 @@ class Animation:
 # the same rate would be hard to tell apart in peripheral vision, which is
 # where a deck is actually read.
 STATUS_ANIMATIONS: dict[str, Animation] = {
-    "idle": Animation(Waveform.STEADY, high=0.30),
-    "working": Animation(Waveform.PULSE, low=0.42, high=1.0, period=2.4),
-    "done": Animation(Waveform.STEADY, high=1.0),
-    "blocked": Animation(Waveform.BLINK, low=0.5, high=1.0, period=1.0),
+    # Dim, but at the measured floor: idle panes still have to be readable.
+    "idle": Animation(Waveform.STEADY, low=LEGIBLE_FLOOR, high=LEGIBLE_FLOOR),
+    # Troughs above idle, so a working pane never looks *dimmer* than an idle
+    # one -- which would invert the meaning at the bottom of each breath.
+    "working": Animation(Waveform.PULSE, low=0.74, high=1.0, period=2.4),
+    "done": Animation(Waveform.STEADY, low=1.0, high=1.0),
+    # The original brief said "blink between 50% and 100%", but a perceptual
+    # 0.5 measured as effectively black on this panel. Swinging the full
+    # legible band keeps the intent -- a pronounced half/full blink -- while
+    # both states stay readable.
+    "blocked": Animation(Waveform.BLINK, low=LEGIBLE_FLOOR, high=1.0, period=1.0),
 }
 
-UNKNOWN_ANIMATION = Animation(Waveform.STEADY, high=0.24)
+# A pane with no detected agent shows only a dot, so it can sit below the
+# legibility floor: there is nothing there worth reading.
+UNKNOWN_ANIMATION = Animation(Waveform.STEADY, low=0.45, high=0.45)
 EMPTY_ANIMATION = Animation(Waveform.STEADY, high=1.0)
 """Empty keys are already dark by their face; do not dim them further."""
 

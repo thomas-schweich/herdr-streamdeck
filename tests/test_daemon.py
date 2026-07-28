@@ -46,6 +46,7 @@ class StubClient:
         self._workspaces = list(workspaces)
         self.requests: list[tuple[str, JSONObject | None]] = []
         self.subscriptions: list[JSONObject] = []
+        self.resubscribes = 0
 
     async def request(self, method: str, params: JSONObject | None = None) -> JSONObject:
         self.requests.append((method, params))
@@ -64,7 +65,11 @@ class StubClient:
         return self._snapshot
 
     async def subscribe(self, subscriptions: Sequence[JSONObject]) -> None:
-        self.subscriptions.extend(subscriptions)
+        self.subscriptions = list(subscriptions)
+
+    async def resubscribe(self, subscriptions: Sequence[JSONObject]) -> None:
+        self.subscriptions = list(subscriptions)
+        self.resubscribes += 1
 
     async def events(self) -> AsyncIterator[Event]:
         for event in self._events:
@@ -476,3 +481,86 @@ async def test_no_icon_override_leaves_the_glyph(monkeypatch: pytest.MonkeyPatch
 
     assert surface.faces[0].icon is None
     assert surface.faces[0].mark == mark_for("claude").glyph
+
+
+# ------------------------------------------------------- status subscriptions
+# pane.updated carries an agent_status field but does NOT fire when status
+# changes -- only pane.agent_status_changed does, and it is pane-scoped.
+# Verified by driving transitions with pane.report_agent. Relying on the global
+# event left status refreshing only on the 60s reconcile.
+
+
+async def test_status_is_subscribed_per_pane() -> None:
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1"), pane_record("w1:p2")]}
+    controller, _, client = make_controller(snapshot=snapshot)
+    await controller.run_subscriptions()
+
+    scoped = [s for s in client.subscriptions if s.get("type") == "pane.agent_status_changed"]
+    assert {s["pane_id"] for s in scoped} == {"w1:p1", "w1:p2"}
+
+
+async def test_status_event_updates_the_pane() -> None:
+    controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    await controller.prime()
+    controller._dirty.clear()
+
+    controller.handle(
+        Event(
+            kind="pane.agent_status_changed",
+            raw_kind="pane.agent_status_changed",
+            data={"pane_id": "w1:p1", "agent_status": "working"},
+        )
+    )
+
+    assert controller._panes["w1:p1"].status == "working"
+    assert controller._dirty.is_set()
+
+
+async def test_repeated_status_event_is_not_a_change() -> None:
+    controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    await controller.prime()
+    controller._dirty.clear()
+
+    controller.handle(
+        Event(
+            kind="pane.agent_status_changed",
+            raw_kind="pane.agent_status_changed",
+            data={"pane_id": "w1:p1", "agent_status": "idle"},
+        )
+    )
+    assert not controller._dirty.is_set()
+
+
+async def test_status_event_for_an_unknown_pane_is_ignored() -> None:
+    controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    await controller.prime()
+
+    controller.handle(
+        Event(
+            kind="pane.agent_status_changed",
+            raw_kind="pane.agent_status_changed",
+            data={"pane_id": "w9:p9", "agent_status": "working"},
+        )
+    )
+    assert "w9:p9" not in controller._panes
+
+
+async def test_subscriptions_are_rebuilt_when_the_pane_set_changes() -> None:
+    client = StubClient({"panes": [pane_record("w1:p1")]})
+    controller = DeckController(client, NullSurface(key_count_=15))
+    await controller.prime()
+    before = client.resubscribes
+
+    # Same panes -> no reconnect; the stream swap is not free.
+    await controller.prime()
+    assert client.resubscribes == before
+
+    client._snapshot = {"panes": [pane_record("w1:p1"), pane_record("w1:p2")]}
+    await controller.prime()
+    assert client.resubscribes == before + 1
+    scoped = {
+        s["pane_id"]
+        for s in client.subscriptions
+        if s.get("type") == "pane.agent_status_changed"
+    }
+    assert scoped == {"w1:p1", "w1:p2"}
