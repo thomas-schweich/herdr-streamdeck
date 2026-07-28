@@ -44,8 +44,14 @@ class GroupingMode(StrEnum):
     """Each column is a tab of one workspace; rows are its panes."""
 
 
-BADGE_LENGTH = 4
-"""Characters a badge can show. The key is 72px wide; four is what fits."""
+BADGE_LENGTH = 8
+"""Characters a badge can show.
+
+Measured against the rendered badge rather than guessed: at the 10px badge
+font there are 56px of usable width, and eight characters of realistic text
+come in under that (``ENG-4521`` is 50.6px, ``refactor`` 39.3px). Strings of
+uniformly wide glyphs (``mmmmmmmm``, 77.9px) still overflow and fall back to
+the renderer's ellipsis, which is an acceptable edge for pane names."""
 
 _TICKET = re.compile(r"^[A-Za-z]{3}-(\d+)(?:-(.+))?$")
 """A ticket-style name: three letters, a hyphen, a number, optionally more."""
@@ -59,14 +65,16 @@ def abbreviate(name: str, limit: int = BADGE_LENGTH) -> str:
     useless for telling them apart. The number, or better a trailing
     description, actually distinguishes them:
 
-    ========================  ========  ==============================
-    name                      badge     why
-    ========================  ========  ==============================
-    ``ENG-4521``              ``4521``  the number identifies it
-    ``ENG-4521-refactor``     ``refa``  a description beats a number
-    ``ENG-45``                ``45``    shorter than the limit is fine
-    ``reviewer``              ``revi``  not a ticket: leading characters
-    ========================  ========  ==============================
+    =========================  ============  =============================
+    name                       badge         why
+    =========================  ============  =============================
+    ``ENG-4521``               ``ENG-4521``  fits whole, so keep it whole
+    ``ENG-45211``              ``45211``     too long: the number identifies
+    ``ENG-4521-refactor``      ``refactor``  a description beats a number
+    ``ENG-4521-authenticate``  ``authenti``  trimmed to the limit
+    ``reviewer``               ``reviewer``  not a ticket, and it fits
+    ``build-and-deploy-all``   ``build-an``  not a ticket: leading characters
+    =========================  ============  =============================
 
     Case is preserved: ticket prefixes are conventionally upper and
     descriptions lower, and flattening either loses a legibility cue.
@@ -74,6 +82,11 @@ def abbreviate(name: str, limit: int = BADGE_LENGTH) -> str:
     trimmed = name.strip()
     if not trimmed:
         return ""
+
+    # Whole name first. Abbreviating something that already fits throws away
+    # information for nothing -- "ENG-4521" is more use than "4521".
+    if len(trimmed) <= limit:
+        return trimmed
 
     ticket = _TICKET.match(trimmed)
     if ticket is None:

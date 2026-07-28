@@ -29,15 +29,16 @@ Status is brightness, not colour: **idle** dim · **working** slow pulse ·
 one shared clock, so every working pane breathes in step rather than each
 starting its own phase.
 
-Badges abbreviate to four characters. Ticket-style names are special-cased,
-because their first four characters are the project prefix — identical on every
-pane, and so useless for telling them apart:
+Badges show up to eight characters. A name that fits is shown whole; longer
+ticket-style names drop the project prefix, since it is identical on every pane
+in the project and so useless for telling them apart:
 
-| pane name | badge |
-| --- | --- |
-| `ENG-4521` | `4521` |
-| `ENG-4521-refactor` | `refa` |
-| `reviewer` | `revi` |
+| pane name | badge | |
+| --- | --- | --- |
+| `ENG-4521` | `ENG-4521` | fits whole |
+| `ENG-45211` | `45211` | too long: the number identifies it |
+| `ENG-4521-refactor` | `refactor` | a description beats a number |
+| `reviewer` | `reviewer` | not a ticket, and it fits |
 
 Agent marks are typographic by default. Drop a PNG named after the agent into
 `$HERDR_PLUGIN_CONFIG_DIR/icons/` (e.g. `claude.png`) to use your own artwork
@@ -96,7 +97,7 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 157 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 161 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```

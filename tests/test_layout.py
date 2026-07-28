@@ -197,25 +197,29 @@ def test_group_defaults_to_no_panes() -> None:
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        # Ticket with no description: the number identifies it.
-        ("ENG-4521", "4521"),
-        ("ENG-452189", "4521"),
-        ("ENG-45", "45"),
-        # A description beats a bare number.
-        ("ENG-4521-refactor", "refa"),
-        ("ENG-4521-x", "x"),
-        ("eng-77-Deploy", "Depl"),
-        # Only up to the next hyphen, never across a separator.
-        ("ENG-4521-refactor-client", "refa"),
-        # Not ticket-shaped: leading characters.
-        ("reviewer", "revi"),
+        # Fits whole: keep it whole, ticket or not.
+        ("ENG-4521", "ENG-4521"),
+        ("ENG-45", "ENG-45"),
+        ("reviewer", "reviewer"),
         ("api", "api"),
-        ("ENGINEERING-123", "ENGI"),  # four letters, not three
-        ("EN-123", "EN-1"),  # two letters, not three
-        ("ENG-abc", "ENG-"),  # no number after the hyphen
+        ("ENG-abc", "ENG-abc"),
+        # Too long: the number identifies it.
+        ("ENG-45211", "45211"),
+        ("ENG-4521123456", "45211234"),
+        # A description beats a bare number.
+        ("ENG-4521-refactor", "refactor"),
+        ("ENG-4521-authenticate", "authenti"),
+        ("ENG-4521-x", "x"),
+        ("eng-77-Deploy", "Deploy"),
+        # Only up to the next hyphen, never across a separator.
+        ("ENG-4521-refactor-client", "refactor"),
+        # Not ticket-shaped: leading characters.
+        ("ENGINEERING-123", "ENGINEER"),  # four letters, not three
+        ("EN-1234567890", "EN-12345"),  # two letters, not three
+        ("build-and-deploy-all", "build-an"),
         ("", ""),
         ("   ", ""),
-        ("  spaced  ", "spac"),
+        ("  spaced out name  ", "spaced o"),
     ],
 )
 def test_abbreviate(name: str, expected: str) -> None:
@@ -224,28 +228,34 @@ def test_abbreviate(name: str, expected: str) -> None:
 
 def test_abbreviate_preserves_case() -> None:
     """Prefixes are conventionally upper and descriptions lower; both cue."""
-    assert abbreviate("ENG-1-Deploy") == "Depl"
-    assert abbreviate("Reviewer") == "Revi"
+    assert abbreviate("ENG-1-Deployment") == "Deployme"
+    assert abbreviate("Reviewer") == "Reviewer"
+
+
+def test_a_name_that_fits_is_never_abbreviated() -> None:
+    """Shortening something that already fits discards information for free."""
+    for name in ("ENG-4521", "ENG-45", "reviewer", "api", "a-b-c"):
+        assert abbreviate(name) == name
 
 
 def test_abbreviate_never_exceeds_the_limit() -> None:
-    for name in ("ENG-999999999", "averyverylongpanename", "ENG-1-descriptive"):
+    for name in ("ENG-9999999999999", "averyverylongpanename", "ENG-1-descriptivename"):
         assert len(abbreviate(name)) <= BADGE_LENGTH
 
 
 def test_badge_uses_the_abbreviation() -> None:
-    assert Pane(pane_id="p1", title="ENG-4521-refactor").badge == "refa"
-    assert Pane(pane_id="p1", label="reviewer").badge == "revi"
+    assert Pane(pane_id="p1", title="ENG-4521-refactor").badge == "refactor"
+    assert Pane(pane_id="p1", label="reviewer").badge == "reviewer"
     assert Pane(pane_id="p1").badge == ""
 
 
 def test_badge_prefers_title_over_label() -> None:
-    pane = Pane(pane_id="p1", title="ENG-77-deploy", label="ignored")
-    assert pane.badge == "depl"
+    pane = Pane(pane_id="p1", title="ENG-77-deployment", label="ignored")
+    assert pane.badge == "deployme"
 
 
 def test_ticket_badges_stay_distinct_within_a_project() -> None:
     """The point of the rule: same prefix must not collapse to one badge."""
-    names = ["ENG-4521", "ENG-4522", "ENG-4523-auth", "ENG-4524-cache"]
+    names = ["ENG-4521", "ENG-4522", "ENG-4523-authentication", "ENG-4524-caching"]
     badges = [abbreviate(n) for n in names]
     assert len(set(badges)) == len(badges), badges
