@@ -96,3 +96,42 @@ def test_absent_agent_gets_the_unknown_dot() -> None:
 
 def test_long_marks_are_scaled_down() -> None:
     assert MARKS["copilot"].scale < MARKS["codex"].scale
+
+
+# ------------------------------------------------------------------ overrides
+
+
+def test_no_override_dir_without_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    from herdr_streamdeck.icons import override_dir, resolve_override
+
+    monkeypatch.delenv("HERDR_PLUGIN_CONFIG_DIR", raising=False)
+    assert override_dir() is None
+    assert resolve_override("claude") is None
+
+
+def test_override_found_for_a_matching_png(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    from pathlib import Path
+
+    from herdr_streamdeck.icons import resolve_override
+
+    root = Path(str(tmp_path))
+    icons = root / "icons"
+    icons.mkdir()
+    (icons / "claude.png").write_bytes(b"not really a png")
+    monkeypatch.setenv("HERDR_PLUGIN_CONFIG_DIR", str(root))
+
+    assert resolve_override("claude") == icons / "claude.png"
+    # Normalisation applies, so display_agent spellings still match.
+    assert resolve_override("Claude") == icons / "claude.png"
+    assert resolve_override("codex") is None
+
+
+def test_override_missing_dir_is_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    from herdr_streamdeck.icons import resolve_override
+
+    monkeypatch.setenv("HERDR_PLUGIN_CONFIG_DIR", str(tmp_path))  # no icons/ inside
+    assert resolve_override("claude") is None

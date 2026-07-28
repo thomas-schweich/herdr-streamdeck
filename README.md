@@ -24,7 +24,14 @@ so the deck always matches what the sidebar shows.
 └─────────┴─────────┴─────────┴─────────┴─────────┘
 ```
 
-amber = working · red = blocked · green = done · grey = idle
+Status is brightness, not colour: **idle** dim · **working** slow pulse ·
+**done** full · **blocked** blinking between half and full. All pulsing runs off
+one shared clock, so every working pane breathes in step rather than each
+starting its own phase.
+
+Agent marks are typographic by default. Drop a PNG named after the agent into
+`$HERDR_PLUGIN_CONFIG_DIR/icons/` (e.g. `claude.png`) to use your own artwork
+instead.
 
 ## Status
 
@@ -79,7 +86,7 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 97 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 129 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```

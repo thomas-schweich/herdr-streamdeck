@@ -342,3 +342,137 @@ def test_null_surface_rejects_out_of_range_key() -> None:
     surface = NullSurface(key_count_=4)
     with pytest.raises(IndexError):
         surface.set_face(9, ButtonFace(mark="x"))
+
+
+# -------------------------------------------------------------------- animation
+
+
+async def test_two_working_panes_share_a_frame() -> None:
+    """Synchronisation, at the level that matters: same instant, same frame.
+
+    They are deliberately given different pane ids and columns; if phase were
+    ever keyed off per-pane state they would drift apart.
+    """
+    snapshot: JSONObject = {
+        "panes": [
+            pane_record("w1:p1", "w1", agent_status="working"),
+            pane_record("w2:p1", "w2", agent_status="working"),
+        ]
+    }
+    controller, surface, _ = make_controller(snapshot=snapshot, workspaces=("w1", "w2"))
+    controller._epoch = 0.0
+    await controller.prime()
+
+    for instant in (0.0, 0.3, 1.1, 2.05, 7.7):
+        controller.tick(instant)
+        assert surface.shown[0] == surface.shown[1], f"drifted at t={instant}"
+
+
+async def test_a_pulse_actually_changes_frames() -> None:
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1", agent_status="working")]}
+    controller, surface, _ = make_controller(snapshot=snapshot)
+    controller._epoch = 0.0
+    await controller.prime()
+
+    seen = set()
+    for step in range(48):
+        controller.tick(step / 20)
+        seen.add(surface.shown[0])
+    assert len(seen) >= 12, f"pulse used only {len(seen)} frames"
+
+
+async def test_steady_statuses_do_not_rewrite() -> None:
+    """Writing costs 1.34 ms a key; idle keys must not consume that forever."""
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1", agent_status="idle")]}
+    controller, surface, _ = make_controller(snapshot=snapshot)
+    controller._epoch = 0.0
+    await controller.prime()
+
+    before = surface.writes
+    for step in range(40):
+        controller.tick(step / 20)
+    assert surface.writes == before, "steady key was rewritten"
+
+
+async def test_done_is_brighter_than_idle() -> None:
+    snapshot: JSONObject = {
+        "panes": [
+            pane_record("w1:p1", "w1", agent_status="idle"),
+            pane_record("w2:p1", "w2", agent_status="done"),
+        ]
+    }
+    controller, surface, _ = make_controller(snapshot=snapshot, workspaces=("w1", "w2"))
+    controller._epoch = 0.0
+    await controller.prime()
+    controller.tick(0.0)
+
+    assert surface.shown[1] > surface.shown[0]
+    assert surface.shown[1] == surface.levels - 1, "done should be full brightness"
+
+
+async def test_blocked_alternates_between_two_frames() -> None:
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1", agent_status="blocked")]}
+    controller, surface, _ = make_controller(snapshot=snapshot)
+    controller._epoch = 0.0
+    await controller.prime()
+
+    levels = set()
+    for step in range(40):
+        controller.tick(step / 20)
+        levels.add(surface.shown[0])
+    assert len(levels) == 2, f"blink should use exactly two frames, got {levels}"
+    assert max(levels) == surface.levels - 1
+
+
+async def test_unchanged_face_is_not_re_rendered() -> None:
+    """Rendering is ~1.26 ms a key; a pulse must not pay it every frame."""
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1", agent_status="working")]}
+    controller, _, _ = make_controller(snapshot=snapshot)
+    await controller.prime()
+    first = controller._frames[0]
+
+    controller.repaint()
+
+    assert controller._frames[0] is first, "identical face was re-rendered"
+
+
+async def test_changed_face_is_re_rendered() -> None:
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
+    controller, _, _ = make_controller(snapshot=snapshot)
+    await controller.prime()
+    first = controller._frames[0]
+
+    controller.handle(updated(pane_record("w1:p1", title="renamed")))
+    controller.repaint()
+
+    assert controller._frames[0] is not first
+    assert controller._frames[0].face.badge == "renamed"
+
+
+async def test_icon_override_reaches_the_face(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp(prefix="hsd-icons"))
+    (root / "icons").mkdir()
+    icon = root / "icons" / "claude.png"
+    icon.write_bytes(b"stub")
+    monkeypatch.setenv("HERDR_PLUGIN_CONFIG_DIR", str(root))
+
+    controller, surface, _ = make_controller(
+        snapshot={"panes": [pane_record("w1:p1", agent="claude")]}
+    )
+    await controller.prime()
+
+    assert surface.faces[0].icon == icon
+
+
+async def test_no_icon_override_leaves_the_glyph(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HERDR_PLUGIN_CONFIG_DIR", raising=False)
+    controller, surface, _ = make_controller(
+        snapshot={"panes": [pane_record("w1:p1", agent="claude")]}
+    )
+    await controller.prime()
+
+    assert surface.faces[0].icon is None
+    assert surface.faces[0].mark == mark_for("claude").glyph

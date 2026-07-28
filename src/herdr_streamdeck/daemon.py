@@ -31,9 +31,10 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Protocol
 
+from .animation import EMPTY_ANIMATION, Animation, animation_for, frame_index
 from .client import HerdrSession
-from .deck import RGB, ButtonFace, ButtonSurface, open_surface
-from .icons import mark_for
+from .deck import RGB, ButtonFace, ButtonSurface, KeyFrames, open_surface
+from .icons import mark_for, resolve_override
 from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
 from .protocol import Event, HerdrError, JSONObject, subscription
 
@@ -58,6 +59,13 @@ STATUS_COLORS: dict[str, RGB] = {
     "done": (34, 168, 82),  # green -- finished, unseen
     "idle": (82, 82, 91),  # grey  -- waiting, seen
 }
+
+ANIMATION_FPS = 20
+"""Frame rate for pulsing and blinking.
+
+A 15-key refresh measured 25 ms (1.34 ms a key), so 20 fps leaves ample
+headroom even in the worst case where every key animates -- and writes are
+skipped when the level is unchanged, so the usual cost is far lower."""
 
 EMPTY_FACE = ButtonFace(background=(20, 20, 23))
 """An unoccupied key: darker than the neutral field, and inert."""
@@ -124,6 +132,13 @@ class DeckController:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._dirty = asyncio.Event()
         self._restructure = False
+        # Prebuffered frames and the animation driving each key.
+        self._frames: dict[int, KeyFrames] = {}
+        self._animations: dict[int, Animation] = {}
+        self._shown: dict[int, int] = {}
+        # One clock for the whole deck: phase must not depend on when a pane
+        # started working, or keys pulse out of step with each other.
+        self._epoch = 0.0
 
     @property
     def grid(self) -> Grid:
@@ -166,18 +181,67 @@ class DeckController:
             mark=mark.glyph,
             mark_color=mark.color,
             mark_scale=mark.scale,
+            # A user PNG in the plugin config dir replaces the glyph.
+            icon=resolve_override(pane.mark_key),
             badge=pane.badge,
             status_color=STATUS_COLORS.get(pane.status),
         )
 
     def repaint(self) -> None:
+        """Re-render keys whose content changed, then show the current frame.
+
+        Rendering is the expensive part (~1.26 ms a key), so a face that has
+        not changed keeps its existing prebuffered frames even when its
+        animation is running.
+        """
         self._rebuild_columns()
         grid = self.grid
+
         for index in range(self._surface.key_count):
-            face = self.face_for(grid.pane_at(self._columns, index))
-            with contextlib.suppress(Exception):
-                # A single failed key must not abort the whole repaint.
-                self._surface.set_face(index, face)
+            pane = grid.pane_at(self._columns, index)
+            face = self.face_for(pane)
+            animation = animation_for(pane.status) if pane else EMPTY_ANIMATION
+            self._animations[index] = animation
+
+            cached = self._frames.get(index)
+            if cached is None or cached.face != face:
+                try:
+                    self._frames[index] = self._surface.render(face)
+                except Exception:
+                    logger.warning("could not render key %d", index, exc_info=True)
+                    continue
+                # Force a write: the cached level now refers to old content.
+                self._shown.pop(index, None)
+
+        self.tick()
+
+    def tick(self, now: float | None = None) -> int:
+        """Advance every key to its frame for the current instant.
+
+        Writes only where the level actually changed -- a USB write measured
+        1.34 ms, so a full 15-key refresh is 25 ms and blind rewriting would
+        cap the deck at ~40 fps for no benefit. Returns the number of writes.
+        """
+        if now is None:
+            loop = self._loop
+            now = loop.time() if loop is not None else 0.0
+        elapsed = now - self._epoch
+        levels = self._surface.levels
+        writes = 0
+
+        for index, frames in self._frames.items():
+            animation = self._animations.get(index, EMPTY_ANIMATION)
+            level = frame_index(animation, elapsed, levels)
+            if self._shown.get(index) == level:
+                continue
+            try:
+                self._surface.write(index, frames, level)
+            except Exception:
+                logger.warning("could not write key %d", index, exc_info=True)
+                continue
+            self._shown[index] = level
+            writes += 1
+        return writes
 
     # ------------------------------------------------------------------ presses
 
@@ -330,6 +394,7 @@ class DeckController:
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
+        self._epoch = self._loop.time()
         self._surface.set_press_handler(self._on_press)
 
         # Order matters: subscribe first so no live change is missed, then
@@ -340,6 +405,7 @@ class DeckController:
         await self.prime()
 
         painter = asyncio.create_task(self._paint_loop(), name="painter")
+        animator = asyncio.create_task(self._animate_loop(), name="animator")
         reconciler = asyncio.create_task(self._reconcile_loop(), name="reconciler")
         try:
             async for event in self._client.events():
@@ -353,11 +419,27 @@ class DeckController:
             # self-reaping.
             logger.info("event stream closed; herdr is gone, shutting down")
         finally:
-            for task in (painter, reconciler):
+            for task in (painter, animator, reconciler):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
             self._surface.set_press_handler(None)
+
+    async def _animate_loop(self) -> None:
+        """Drive pulsing and blinking from the shared clock.
+
+        Sleeps to the next frame boundary rather than a fixed interval, so
+        phase does not drift when a tick runs long -- drift would gradually
+        desynchronise keys, which is the one thing this must not do.
+        """
+        loop = asyncio.get_running_loop()
+        interval = 1.0 / ANIMATION_FPS
+        while True:
+            if any(a.animated for a in self._animations.values()):
+                self.tick(loop.time())
+            # Align to the grid so ticks stay in phase with the epoch.
+            now = loop.time()
+            await asyncio.sleep(max(0.0, interval - ((now - self._epoch) % interval)))
 
     async def _reconcile_loop(self) -> None:
         """Re-snapshot periodically so the model cannot drift indefinitely.
