@@ -159,6 +159,13 @@ window to see the error:
 
 ## Running the daemon
 
+> **Run the daemon, not a script.** Keys only become live when
+> `DeckController.run()` installs the press handler. Driving `prime()`/`tick()`
+> directly from a script gives a correct-looking display with dead keys, which
+> is easy to mistake for a hardware fault. The daemon logs
+> `press handler installed; keys are live` at startup — if that line is absent,
+> presses will do nothing.
+
 No hardware needed to develop against a live herdr server:
 
 ```bash

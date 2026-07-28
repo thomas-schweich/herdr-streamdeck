@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -14,7 +15,7 @@ from herdr_streamdeck.daemon import (
     DeckController,
     _iter_panes,
 )
-from herdr_streamdeck.deck import ButtonFace, NullSurface
+from herdr_streamdeck.deck import ButtonFace, NullSurface, PressHandler
 from herdr_streamdeck.icons import mark_for
 from herdr_streamdeck.protocol import Event, HerdrError, JSONObject
 
@@ -564,3 +565,31 @@ async def test_subscriptions_are_rebuilt_when_the_pane_set_changes() -> None:
         if s.get("type") == "pane.agent_status_changed"
     }
     assert scoped == {"w1:p1", "w1:p2"}
+
+
+@dataclass
+class RecordingSurface(NullSurface):
+    """NullSurface that remembers every press handler installed on it."""
+
+    installs: list[PressHandler] = field(default_factory=list)
+
+    def set_press_handler(self, handler: PressHandler | None) -> None:
+        if handler is not None:
+            self.installs.append(handler)
+        super().set_press_handler(handler)
+
+
+async def test_run_installs_the_press_handler() -> None:
+    """Keys are dead until run() wires this up.
+
+    Driving the controller directly -- prime()/tick() from a script -- gives a
+    correct display with unresponsive keys, which looks like a hardware fault.
+    """
+    surface = RecordingSurface(key_count_=15)
+    client = StubClient({"panes": [pane_record("w1:p1")]}, events=[])
+    controller = DeckController(client, surface, reconcile_interval=3600)
+
+    await asyncio.wait_for(controller.run(), timeout=10)
+
+    assert surface.installs, "run() must install a press handler"
+    assert surface.installs[0] == controller._on_press

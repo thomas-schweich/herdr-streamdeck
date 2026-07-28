@@ -100,7 +100,7 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 163 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 164 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```

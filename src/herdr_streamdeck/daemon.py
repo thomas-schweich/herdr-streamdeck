@@ -259,7 +259,12 @@ class DeckController:
             return
         loop = self._loop
         if loop is None:
+            # Only reachable if a press arrives before run() starts. Logged
+            # rather than dropped silently: "buttons do nothing" is otherwise
+            # indistinguishable from the handler never being installed.
+            logger.warning("key %d pressed before the controller was running", index)
             return
+        logger.debug("key %d pressed", index)
         loop.call_soon_threadsafe(self._dispatch_press, index)
 
     def _dispatch_press(self, index: int) -> None:
@@ -434,6 +439,10 @@ class DeckController:
         self._loop = asyncio.get_running_loop()
         self._epoch = self._loop.time()
         self._surface.set_press_handler(self._on_press)
+        # Stated explicitly at startup: presses only work once run() installs
+        # this, so a script that drives the controller directly has a live
+        # display and dead keys. The log should make that obvious.
+        logger.info("press handler installed; keys are live")
 
         # Order matters: subscribe first so no live change is missed, then
         # throw away the replayed backlog, then snapshot. Snapshotting before
