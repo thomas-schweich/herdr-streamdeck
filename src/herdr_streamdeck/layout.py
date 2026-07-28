@@ -24,6 +24,7 @@ herdr's, which is precisely what mirroring must not do.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -41,6 +42,49 @@ class GroupingMode(StrEnum):
 
     TAB = "tab"
     """Each column is a tab of one workspace; rows are its panes."""
+
+
+BADGE_LENGTH = 4
+"""Characters a badge can show. The key is 72px wide; four is what fits."""
+
+_TICKET = re.compile(r"^[A-Za-z]{3}-(\d+)(?:-(.+))?$")
+"""A ticket-style name: three letters, a hyphen, a number, optionally more."""
+
+
+def abbreviate(name: str, limit: int = BADGE_LENGTH) -> str:
+    """Shorten a pane name to what fits on a key.
+
+    Ticket-style names are the interesting case, because their first four
+    characters are the project prefix -- identical across every pane, and so
+    useless for telling them apart. The number, or better a trailing
+    description, actually distinguishes them:
+
+    ========================  ========  ==============================
+    name                      badge     why
+    ========================  ========  ==============================
+    ``ENG-4521``              ``4521``  the number identifies it
+    ``ENG-4521-refactor``     ``refa``  a description beats a number
+    ``ENG-45``                ``45``    shorter than the limit is fine
+    ``reviewer``              ``revi``  not a ticket: leading characters
+    ========================  ========  ==============================
+
+    Case is preserved: ticket prefixes are conventionally upper and
+    descriptions lower, and flattening either loses a legibility cue.
+    """
+    trimmed = name.strip()
+    if not trimmed:
+        return ""
+
+    ticket = _TICKET.match(trimmed)
+    if ticket is None:
+        return trimmed[:limit]
+
+    number, rest = ticket.group(1), ticket.group(2)
+    if rest:
+        # Only up to the next hyphen: "4521-refactor-client" describes itself
+        # as "refa", not as a slice spanning a separator.
+        return rest.split("-", 1)[0][:limit]
+    return number[:limit]
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +133,8 @@ class Pane:
 
     @property
     def badge(self) -> str:
-        """Text for the corner badge: the most specific name available."""
-        return self.title or self.label or ""
+        """Text for the corner badge: the most specific name, abbreviated."""
+        return abbreviate(self.title or self.label or "")
 
 
 @dataclass(frozen=True, slots=True)

@@ -144,7 +144,7 @@ async def test_agent_mark_and_badge_are_drawn() -> None:
 
     face = surface.faces[0]
     assert face.mark == mark_for("qwencode").glyph
-    assert face.badge == "deploy-review"
+    assert face.badge == "depl", "badge is abbreviated to fit the key"
 
 
 async def test_status_sets_the_strip_not_the_field() -> None:
@@ -451,7 +451,7 @@ async def test_changed_face_is_re_rendered() -> None:
     controller.repaint()
 
     assert controller._frames[0] is not first
-    assert controller._frames[0].face.badge == "renamed"
+    assert controller._frames[0].face.badge == "rena"
 
 
 async def test_icon_override_reaches_the_face(monkeypatch: pytest.MonkeyPatch) -> None:
