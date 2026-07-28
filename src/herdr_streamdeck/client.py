@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import itertools
 import os
+import sys
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from types import TracebackType
@@ -106,6 +107,18 @@ class HerdrClient:
         if not self.socket_path.exists():
             raise FileNotFoundError(
                 f"herdr socket not found at {self.socket_path} -- is the server running?"
+            )
+
+        # sun_path is 104 bytes on macOS and 108 on Linux, and the kernel
+        # reports overflow as a bare "AF_UNIX path too long" with no mention of
+        # which path. herdr's own default is short, but HERDR_SOCKET_PATH can
+        # point anywhere, so say what actually went wrong.
+        encoded = str(self.socket_path).encode()
+        limit = 104 if sys.platform == "darwin" else 108
+        if len(encoded) >= limit:
+            raise OSError(
+                f"socket path is {len(encoded)} bytes, over this platform's "
+                f"{limit}-byte AF_UNIX limit: {self.socket_path}"
             )
         self._reader, self._writer = await asyncio.open_unix_connection(str(self.socket_path))
         self._closed.clear()

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -57,11 +59,14 @@ class FakeServer:
 
 
 @pytest.fixture
-async def server(tmp_path: Path) -> AsyncIterator[Callable[[Handler], Awaitable[Path]]]:
+async def server() -> AsyncIterator[Callable[[Handler], Awaitable[Path]]]:
     started: list[FakeServer] = []
+    # NOT pytest's tmp_path: its paths run ~90 chars on CI runners, and macOS
+    # caps AF_UNIX sun_path at 104 bytes. A short dir keeps this portable.
+    root = Path(tempfile.mkdtemp(prefix="hsd"))
 
     async def start(handler: Handler) -> Path:
-        path = tmp_path / "herdr.sock"
+        path = root / "h.sock"
         fake = FakeServer(path, handler)
         await fake.start()
         started.append(fake)
@@ -71,6 +76,7 @@ async def server(tmp_path: Path) -> AsyncIterator[Callable[[Handler], Awaitable[
 
     for fake in started:
         await fake.stop()
+    shutil.rmtree(root, ignore_errors=True)
 
 
 async def test_request_returns_result(
@@ -208,3 +214,16 @@ def test_socket_path_falls_back_to_xdg(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HERDR_SOCKET_PATH", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", "/xdg")
     assert default_socket_path() == Path("/xdg/herdr/herdr.sock")
+
+
+async def test_overlong_socket_path_is_reported_clearly() -> None:
+    """macOS caps AF_UNIX at 104 bytes; the kernel error names no path."""
+    root = Path(tempfile.mkdtemp(prefix="hsd"))
+    try:
+        deep = root / ("d" * 90) / ("e" * 90) / "herdr.sock"
+        deep.parent.mkdir(parents=True, exist_ok=True)
+        deep.touch()
+        with pytest.raises(OSError, match="AF_UNIX limit"):
+            await HerdrClient(deep).connect()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
