@@ -8,16 +8,23 @@ from typing import Any
 
 import pytest
 
-from herdr_streamdeck.daemon import STATUS_COLORS, DeckController, Pane, _iter_panes
+from herdr_streamdeck.daemon import (
+    STATUS_COLORS,
+    STRUCTURAL_EVENTS,
+    DeckController,
+    _iter_panes,
+)
 from herdr_streamdeck.deck import ButtonFace, NullSurface
+from herdr_streamdeck.icons import mark_for
 from herdr_streamdeck.protocol import Event, HerdrError, JSONObject
 
 
-def pane_record(pane_id: str, **overrides: Any) -> JSONObject:
+def pane_record(pane_id: str, workspace: str = "w1", **overrides: Any) -> JSONObject:
     record: JSONObject = {
         "pane_id": pane_id,
         "terminal_id": f"term_{pane_id}",
-        "workspace_id": pane_id.split(":")[0],
+        "workspace_id": workspace,
+        "tab_id": f"{workspace}:t1",
         "agent": "claude",
         "agent_status": "idle",
     }
@@ -26,21 +33,31 @@ def pane_record(pane_id: str, **overrides: Any) -> JSONObject:
 
 
 class StubClient:
-    """Stands in for HerdrClient; records requests, replays canned events.
-
-    Structurally satisfies daemon.HerdrLike, so no cast is needed.
-    """
+    """Structurally satisfies daemon.HerdrLike; no cast needed."""
 
     def __init__(
-        self, snapshot: JSONObject | None = None, events: list[Event] | None = None
+        self,
+        snapshot: JSONObject | None = None,
+        events: list[Event] | None = None,
+        workspaces: Sequence[str] = ("w1",),
     ) -> None:
         self._snapshot = snapshot or {}
         self._events = events or []
+        self._workspaces = list(workspaces)
         self.requests: list[tuple[str, JSONObject | None]] = []
         self.subscriptions: list[JSONObject] = []
 
     async def request(self, method: str, params: JSONObject | None = None) -> JSONObject:
         self.requests.append((method, params))
+        if method == "workspace.list":
+            return {
+                "workspaces": [
+                    {"workspace_id": w, "label": w, "focused": i == 0}
+                    for i, w in enumerate(self._workspaces)
+                ]
+            }
+        if method == "tab.list":
+            return {"tabs": []}
         return {}
 
     async def snapshot(self) -> JSONObject:
@@ -55,281 +72,273 @@ class StubClient:
 
 
 def make_controller(
-    *, snapshot: JSONObject | None = None, keys: int = 4
+    *,
+    snapshot: JSONObject | None = None,
+    workspaces: Sequence[str] = ("w1",),
+    rows: int = 3,
+    columns: int = 5,
 ) -> tuple[DeckController, NullSurface, StubClient]:
-    client = StubClient(snapshot)
-    surface = NullSurface(key_count_=keys)
-    controller = DeckController(client, surface)
-    return controller, surface, client
+    client = StubClient(snapshot, workspaces=workspaces)
+    surface = NullSurface(key_count_=rows * columns, key_layout_=(rows, columns))
+    return DeckController(client, surface), surface, client
 
 
-def as_pane(record: JSONObject) -> Pane:
-    """Parse a record, failing the test if it is rejected."""
-    pane = Pane.from_record(record)
-    assert pane is not None
-    return pane
+def updated(record: JSONObject) -> Event:
+    return Event(kind="pane.updated", raw_kind="pane_updated", data={"pane": record})
 
 
-def test_pane_from_record_requires_pane_id() -> None:
-    assert Pane.from_record({"terminal_id": "t"}) is None
-
-
-def test_pane_display_prefers_label_then_agent() -> None:
-    assert as_pane(pane_record("w1:p1", label="reviewer")).display == "reviewer"
-    assert as_pane(pane_record("w1:p1")).display == "claude"
-    assert as_pane(pane_record("w1:p1", agent="", label="")).display == "w1:p1"
+# -------------------------------------------------------------------- snapshot
 
 
 def test_iter_panes_walks_nested_snapshot() -> None:
-    snapshot: JSONObject = {
-        "workspaces": [
-            {
-                "workspace_id": "w1",
-                "tabs": [{"tab_id": "w1:t1", "panes": [pane_record("w1:p1")]}],
-            }
-        ]
-    }
-    found = _iter_panes(snapshot)
+    snapshot: JSONObject = {"workspaces": [{"tabs": [{"panes": [pane_record("w1:p1")]}]}]}
+    assert [p["pane_id"] for p in _iter_panes(snapshot)] == ["w1:p1"]
+
+
+def test_iter_panes_dedupes_panes_listed_twice() -> None:
+    """Panes appear under both snapshot.agents[] and snapshot.panes[]."""
+    record = pane_record("w1:p1")
+    found = _iter_panes({"agents": [record], "panes": [record]})
     assert [p["pane_id"] for p in found] == ["w1:p1"]
 
 
-def test_iter_panes_ignores_pane_id_without_terminal() -> None:
-    # pane.closed events carry a bare pane_id; those are not pane records.
+def test_iter_panes_ignores_bare_pane_ids() -> None:
+    # pane.closed events carry a bare pane_id; that is not a pane record.
     assert _iter_panes({"data": {"pane_id": "w1:p1"}}) == []
 
 
-async def test_prime_paints_from_snapshot() -> None:
-    snapshot: JSONObject = {"panes": [pane_record("w1:p1"), pane_record("w1:p2")]}
-    controller, surface, _ = make_controller(snapshot=snapshot)
-    await controller.prime()
-
-    assert surface.faces[0].label == "claude"
-    assert surface.faces[0].color == STATUS_COLORS["idle"]
-    # Unused keys are blanked, not left stale.
-    assert surface.faces[3].label == ""
-
-
-async def test_status_change_recolours_the_key() -> None:
-    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
-    controller, surface, _ = make_controller(snapshot=snapshot)
-    await controller.prime()
-    assert surface.faces[0].color == STATUS_COLORS["idle"]
-
-    controller.handle(
-        Event(
-            kind="pane.updated",
-            raw_kind="pane_updated",
-            data={"pane": pane_record("w1:p1", agent_status="blocked")},
-        )
-    )
-    controller.repaint()
-
-    assert surface.faces[0].color == STATUS_COLORS["blocked"]
-    assert surface.faces[0].sublabel == "blocked"
-
-
-async def test_closed_pane_frees_its_key() -> None:
-    snapshot: JSONObject = {"panes": [pane_record("w1:p1"), pane_record("w1:p2")]}
-    controller, surface, _ = make_controller(snapshot=snapshot)
-    await controller.prime()
-    assert surface.faces[1].label == "claude"
-
-    controller.handle(
-        Event(kind="pane.closed", raw_kind="pane_closed", data={"pane_id": "w1:p1"})
-    )
-    controller.repaint()
-
-    # w1:p2 slides down to key 0 and key 1 is blanked.
-    assert surface.faces[1].label == ""
-
-
-async def test_panes_without_agents_are_hidden_by_default() -> None:
-    snapshot: JSONObject = {"panes": [pane_record("w1:p1", agent=""), pane_record("w1:p2")]}
-    controller, surface, _ = make_controller(snapshot=snapshot)
-    await controller.prime()
-
-    assert surface.faces[0].label == "claude"
-    assert surface.faces[1].label == ""
-
-
-async def test_key_assignment_is_stable_across_repaints() -> None:
-    """Buttons must not shuffle when an unrelated pane updates."""
+def test_iter_panes_preserves_snapshot_order() -> None:
+    """Order is herdr's split-tree order and must survive the walk."""
     snapshot: JSONObject = {
-        "panes": [pane_record("w1:p2"), pane_record("w1:p1"), pane_record("w1:p3")]
+        "panes": [pane_record("w1:p9"), pane_record("w1:p1"), pane_record("w1:p5")]
     }
-    controller, _, _ = make_controller(snapshot=snapshot)
-    await controller.prime()
-    before = list(controller._slots)
+    assert [p["pane_id"] for p in _iter_panes(snapshot)] == ["w1:p9", "w1:p1", "w1:p5"]
 
-    controller.handle(
-        Event(
-            kind="pane.updated",
-            raw_kind="pane_updated",
-            data={"pane": pane_record("w1:p3", agent_status="working")},
-        )
-    )
+
+# ---------------------------------------------------------------------- render
+
+
+async def test_prime_mirrors_herdr_column_order() -> None:
+    snapshot: JSONObject = {"panes": [pane_record("w2:p1", "w2"), pane_record("w1:p1", "w1")]}
+    controller, _, _ = make_controller(snapshot=snapshot, workspaces=("w2", "w1"))
+    await controller.prime()
+
+    # w2 leads the listing, so it owns column 0 despite sorting later.
+    assert controller._columns[0] is not None
+    assert controller._columns[0].id == "w2"
+    assert controller._columns[1] is not None
+    assert controller._columns[1].id == "w1"
+
+
+async def test_agent_mark_and_badge_are_drawn() -> None:
+    snapshot: JSONObject = {
+        "panes": [pane_record("w1:p1", display_agent="qwencode", title="deploy-review")]
+    }
+    controller, surface, _ = make_controller(snapshot=snapshot)
+    await controller.prime()
+
+    face = surface.faces[0]
+    assert face.mark == mark_for("qwencode").glyph
+    assert face.badge == "deploy-review"
+
+
+async def test_status_sets_the_strip_not_the_field() -> None:
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
+    controller, surface, _ = make_controller(snapshot=snapshot)
+    await controller.prime()
+    assert surface.faces[0].status_color == STATUS_COLORS["idle"]
+
+    controller.handle(updated(pane_record("w1:p1", agent_status="blocked")))
     controller.repaint()
 
-    assert controller._slots == before
+    face = surface.faces[0]
+    assert face.status_color == STATUS_COLORS["blocked"]
+    # The field stays neutral: status lives in the strip.
+    assert face.background == ButtonFace().background
 
 
-async def test_more_panes_than_keys_is_truncated() -> None:
-    snapshot: JSONObject = {"panes": [pane_record(f"w1:p{i}") for i in range(10)]}
-    controller, _, _ = make_controller(snapshot=snapshot, keys=4)
+async def test_unknown_status_draws_no_strip() -> None:
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1", agent_status="unknown")]}
+    controller, surface, _ = make_controller(snapshot=snapshot)
     await controller.prime()
-    assert len(controller._slots) == 4
+    assert surface.faces[0].status_color is None
 
 
-async def test_press_focuses_the_mapped_pane() -> None:
-    snapshot: JSONObject = {"panes": [pane_record("w1:p1"), pane_record("w1:p2")]}
-    controller, surface, client = make_controller(snapshot=snapshot)
-    controller._loop = asyncio.get_running_loop()
-    surface.set_press_handler(controller._on_press)
+async def test_unoccupied_keys_are_blank() -> None:
+    controller, surface, _ = make_controller(snapshot={"panes": []})
     await controller.prime()
-
-    surface.press(1)
-    await asyncio.sleep(0.01)
-
-    assert ("pane.focus", {"pane_id": "w1:p2"}) in client.requests
+    assert all(f.mark == "" and f.badge == "" for f in surface.faces.values())
 
 
-async def test_release_does_not_focus() -> None:
-    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
-    controller, surface, client = make_controller(snapshot=snapshot)
-    controller._loop = asyncio.get_running_loop()
-    surface.set_press_handler(controller._on_press)
+# ---------------------------------------------------------------------- events
+
+
+@pytest.mark.parametrize("kind", sorted(STRUCTURAL_EVENTS))
+async def test_structural_events_schedule_a_reread(kind: str) -> None:
+    """Ordering is not in the payload, so the model is rebuilt from herdr."""
+    controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
     await controller.prime()
 
-    surface.press(0, pressed=False)
-    await asyncio.sleep(0.01)
+    controller.handle(Event(kind=kind, raw_kind=kind.replace(".", "_"), data={}))
 
-    assert client.requests == []
+    assert controller._restructure is True
+    assert controller._dirty.is_set()
 
 
-async def test_press_on_empty_key_is_ignored() -> None:
-    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
-    controller, surface, client = make_controller(snapshot=snapshot)
-    controller._loop = asyncio.get_running_loop()
-    surface.set_press_handler(controller._on_press)
+async def test_cosmetic_update_does_not_trigger_a_reread() -> None:
+    """A status change must not cost a snapshot round-trip."""
+    controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
     await controller.prime()
+    controller._dirty.clear()
 
-    surface.press(3)
-    await asyncio.sleep(0.01)
+    controller.handle(updated(pane_record("w1:p1", agent_status="working")))
 
-    assert client.requests == []
-
-
-def test_null_surface_rejects_out_of_range_key() -> None:
-    surface = NullSurface(key_count_=4)
-    with pytest.raises(IndexError):
-        surface.set_face(9, ButtonFace(label="nope"))
+    assert controller._restructure is False
+    assert controller._dirty.is_set()
 
 
-# --------------------------------------------------------------- replay / drift
-# herdr replays a historical backlog when a subscription starts, and not in
-# causal order -- a pane.closed can arrive before its own pane.created. These
-# pin the handling, since naive application resurrects dead panes forever.
+async def test_identical_update_is_not_a_change() -> None:
+    controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    await controller.prime()
+    controller._dirty.clear()
+
+    controller.handle(updated(pane_record("w1:p1")))
+
+    assert not controller._dirty.is_set()
 
 
-async def test_snapshot_dedupes_panes_listed_twice() -> None:
-    """A pane appears under both snapshot.agents[] and snapshot.panes[]."""
-    record = pane_record("w1:p1")
-    snapshot: JSONObject = {"agents": [record], "panes": [record]}
-    found = _iter_panes(snapshot)
-    assert [p["pane_id"] for p in found] == ["w1:p1"]
-
-
-async def test_prime_drops_panes_absent_from_snapshot() -> None:
-    """Snapshot is authoritative; anything it omits is gone."""
+async def test_prime_drops_panes_absent_from_the_snapshot() -> None:
     controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
     await controller.prime()
 
     # A stale pane sneaks in, as an out-of-order replayed create would.
-    controller.handle(
-        Event(
-            kind="pane.created",
-            raw_kind="pane_created",
-            data={"pane": pane_record("w1:p99")},
-        )
-    )
-    controller.repaint()
-    assert "w1:p99" in controller._slots
+    controller.handle(updated(pane_record("w1:p99")))
+    assert "w1:p99" in controller._panes
 
-    await controller.prime()  # reconcile
-    assert "w1:p99" not in controller._slots
-    assert controller._slots == ["w1:p1"]
+    await controller.prime()
+    assert "w1:p99" not in controller._panes
 
 
 async def test_drain_replay_discards_the_backlog() -> None:
     replayed = [
         Event(
-            kind="pane.created", raw_kind="pane_created", data={"pane": pane_record("w1:p3")}
+            kind="pane.created",
+            raw_kind="pane_created",
+            data={"pane": pane_record("w1:p3")},
         ),
         Event(kind="pane.closed", raw_kind="pane_closed", data={"pane_id": "w1:p3"}),
     ]
     client = StubClient({"panes": [pane_record("w1:p1")]}, events=replayed)
-    surface = NullSurface(key_count_=4)
-    controller = DeckController(client, surface)
+    controller = DeckController(client, NullSurface(key_count_=15))
 
     assert await controller.drain_replay(quiet=0.05, limit=1.0) == 2
     await controller.prime()
-    # The replayed pane must not survive into the model.
-    assert controller._slots == ["w1:p1"]
+    assert list(controller._panes) == ["w1:p1"]
+
+
+# --------------------------------------------------------------------- presses
+
+
+async def test_press_focuses_the_pane_under_that_key() -> None:
+    snapshot: JSONObject = {
+        "panes": [
+            pane_record("w1:p1", "w1"),
+            pane_record("w1:p2", "w1"),
+            pane_record("w2:p1", "w2"),
+        ]
+    }
+    controller, surface, client = make_controller(snapshot=snapshot, workspaces=("w1", "w2"))
+    controller._loop = asyncio.get_running_loop()
+    surface.set_press_handler(controller._on_press)
+    await controller.prime()
+
+    surface.press(5)  # row 1, column 0 -> second pane of w1
+    await asyncio.sleep(0.01)
+    assert ("pane.focus", {"pane_id": "w1:p2"}) in client.requests
+
+    surface.press(1)  # row 0, column 1 -> first pane of w2
+    await asyncio.sleep(0.01)
+    assert ("pane.focus", {"pane_id": "w2:p1"}) in client.requests
+
+
+async def test_release_does_not_focus() -> None:
+    controller, surface, client = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._loop = asyncio.get_running_loop()
+    surface.set_press_handler(controller._on_press)
+    await controller.prime()
+    client.requests.clear()
+
+    surface.press(0, pressed=False)
+    await asyncio.sleep(0.01)
+    assert client.requests == []
+
+
+async def test_press_on_an_empty_key_is_ignored() -> None:
+    controller, surface, client = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._loop = asyncio.get_running_loop()
+    surface.set_press_handler(controller._on_press)
+    await controller.prime()
+    client.requests.clear()
+
+    surface.press(14)
+    await asyncio.sleep(0.01)
+    assert client.requests == []
 
 
 async def test_focus_drops_a_pane_the_server_says_is_gone() -> None:
     class GoneClient(StubClient):
         async def request(self, method: str, params: JSONObject | None = None) -> JSONObject:
-            await super().request(method, params)
-            raise HerdrError("pane_not_found", "pane is gone")
+            result = await super().request(method, params)
+            if method == "pane.focus":
+                raise HerdrError("pane_not_found", "pane is gone")
+            return result
 
     client = GoneClient({"panes": [pane_record("w1:p1"), pane_record("w1:p2")]})
-    surface = NullSurface(key_count_=4)
-    controller = DeckController(client, surface)
+    controller = DeckController(client, NullSurface(key_count_=15))
     controller._loop = asyncio.get_running_loop()
     await controller.prime()
-    assert "w1:p1" in controller._slots
 
     controller._dispatch_press(0)
     await asyncio.sleep(0.01)
-    controller.repaint()
-
-    assert "w1:p1" not in controller._slots
+    assert "w1:p1" not in controller._panes
 
 
-async def test_focus_keeps_pane_on_other_errors() -> None:
+async def test_focus_keeps_the_pane_on_other_errors() -> None:
     """Only pane_not_found means gone; a transient error must not drop it."""
 
     class FlakyClient(StubClient):
         async def request(self, method: str, params: JSONObject | None = None) -> JSONObject:
-            await super().request(method, params)
-            raise HerdrError("internal_error", "try again")
+            result = await super().request(method, params)
+            if method == "pane.focus":
+                raise HerdrError("internal_error", "try again")
+            return result
 
     client = FlakyClient({"panes": [pane_record("w1:p1")]})
-    surface = NullSurface(key_count_=4)
-    controller = DeckController(client, surface)
+    controller = DeckController(client, NullSurface(key_count_=15))
     controller._loop = asyncio.get_running_loop()
     await controller.prime()
 
     controller._dispatch_press(0)
     await asyncio.sleep(0.01)
-    controller.repaint()
+    assert "w1:p1" in controller._panes
 
-    assert controller._slots == ["w1:p1"]
+
+# ------------------------------------------------------------------- lifecycle
 
 
 async def test_run_returns_when_the_event_stream_closes() -> None:
-    """Self-reaping: herdr orphans startup processes, so exit rather than retry.
-
-    A daemon that reconnected forever would survive a herdr restart still
-    holding the Stream Deck, locking out its replacement.
-    """
+    """Self-reaping: herdr orphans startup processes, so exit rather than retry."""
     client = StubClient({"panes": [pane_record("w1:p1")]}, events=[])
-    surface = NullSurface(key_count_=4)
+    surface = NullSurface(key_count_=15)
     controller = DeckController(client, surface, reconcile_interval=3600)
 
-    # Returns rather than hanging once the stream ends.
     await asyncio.wait_for(controller.run(), timeout=10)
 
     assert client.subscriptions, "should have subscribed before streaming"
     assert surface._handler is None, "press handler released on shutdown"
+
+
+def test_null_surface_rejects_out_of_range_key() -> None:
+    surface = NullSurface(key_count_=4)
+    with pytest.raises(IndexError):
+        surface.set_face(9, ButtonFace(mark="x"))

@@ -13,7 +13,13 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
+
+if TYPE_CHECKING:
+    from PIL import ImageFont
+
+    # PIL returns different font classes depending on which loader worked.
+    ImageFontLike: TypeAlias = ImageFont.FreeTypeFont | ImageFont.ImageFont
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +29,33 @@ PressHandler = Callable[[int, bool], None]
 """Called with (key_index, pressed). ``pressed`` is False on release."""
 
 
+BACKGROUND: RGB = (38, 38, 42)
+"""Neutral grey field. The mark and the status strip carry the colour."""
+
+BADGE_FILL: RGB = (72, 72, 80)
+BADGE_TEXT: RGB = (236, 236, 241)
+
+
 @dataclass(frozen=True, slots=True)
 class ButtonFace:
-    """What a single key should show."""
+    """What a single key should show.
 
-    label: str = ""
-    sublabel: str = ""
-    color: RGB = (24, 24, 27)
-    text_color: RGB = (250, 250, 250)
+    A neutral field with the agent's mark centred, an optional status strip
+    along the top edge, and the pane's name in a badge near the lower-right --
+    offset from the corner rather than flush to it, echoing how Claude Code
+    shows a session name inside its prompt box.
+    """
+
+    mark: str = ""
+    """Agent glyph, e.g. the asterisk for Claude or the pi for pi."""
+
+    mark_color: RGB = (228, 228, 231)
+    mark_scale: float = 1.0
+    badge: str = ""
+    status_color: RGB | None = None
+    """Thin strip along the top edge. None draws no strip."""
+
+    background: RGB = BACKGROUND
 
 
 class DeckDevice(Protocol):
@@ -62,6 +87,8 @@ class DeckDevice(Protocol):
         self, callback: Callable[[DeckDevice, int, bool], None] | None
     ) -> None: ...
 
+    def key_layout(self) -> tuple[int, int]: ...
+
     def set_key_image(self, key: int, image: bytes) -> None: ...
 
 
@@ -71,6 +98,11 @@ class ButtonSurface(Protocol):
 
     @property
     def key_count(self) -> int: ...
+
+    @property
+    def key_layout(self) -> tuple[int, int]: ...
+
+    """(rows, columns). An MK.2 reports (3, 5)."""
 
     def open(self) -> None: ...
 
@@ -90,6 +122,7 @@ class NullSurface:
     """
 
     key_count_: int = 15
+    key_layout_: tuple[int, int] = (3, 5)
     faces: dict[int, ButtonFace] = field(default_factory=dict)
     opened: bool = False
     _handler: PressHandler | None = None
@@ -97,6 +130,10 @@ class NullSurface:
     @property
     def key_count(self) -> int:
         return self.key_count_
+
+    @property
+    def key_layout(self) -> tuple[int, int]:
+        return self.key_layout_
 
     def open(self) -> None:
         self.opened = True
@@ -132,10 +169,15 @@ class StreamDeckSurface:
         self._handler: PressHandler | None = None
         self._lock = threading.Lock()
         self._key_count = 0
+        self._key_layout = (0, 0)
 
     @property
     def key_count(self) -> int:
         return self._key_count
+
+    @property
+    def key_layout(self) -> tuple[int, int]:
+        return self._key_layout
 
     def open(self) -> None:
         from StreamDeck.DeviceManager import DeviceManager
@@ -172,7 +214,9 @@ class StreamDeckSurface:
 
         self._deck = chosen
         self._key_count = int(chosen.key_count())
-        logger.info("opened Stream Deck with %d keys", self._key_count)
+        rows, columns = chosen.key_layout()
+        self._key_layout = (int(rows), int(columns))
+        logger.info("opened Stream Deck: %d keys, %dx%d", self._key_count, rows, columns)
 
     def close(self) -> None:
         deck = self._deck
@@ -204,44 +248,83 @@ class StreamDeckSurface:
         with self._lock:
             deck.set_key_image(index, image)
 
+    @staticmethod
+    def _font(size: int) -> ImageFontLike:
+        from PIL import ImageFont
+
+        for name in ("DejaVuSans.ttf", "Arial Unicode.ttf", "Helvetica.ttc"):
+            try:
+                return ImageFont.truetype(name, size)
+            except OSError:
+                continue
+        # Bundled bitmap fallback: ugly, fixed-size, but never missing. Every
+        # glyph in icons.MARKS is verified present in DejaVu, so this path is
+        # only reached on a system with no usable TrueType font at all.
+        return ImageFont.load_default()
+
     def _render(self, deck: DeckDevice, face: ButtonFace) -> bytes:
-        from PIL import ImageDraw, ImageFont
+        from PIL import ImageDraw
         from StreamDeck.ImageHelpers import PILHelper
 
-        source = PILHelper.create_key_image(deck, background=face.color)
+        source = PILHelper.create_key_image(deck, background=face.background)
         draw = ImageDraw.Draw(source)
-
-        font: ImageFont.FreeTypeFont | ImageFont.ImageFont
-        small: ImageFont.FreeTypeFont | ImageFont.ImageFont
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 14)
-            small = ImageFont.truetype("DejaVuSans.ttf", 11)
-        except OSError:
-            # Bundled bitmap fallback; ugly but never missing.
-            font = ImageFont.load_default()
-            small = font
-
         width, height = source.size
-        if face.label:
+
+        # Status along the top edge, so the neutral field stays neutral while
+        # agent state is still readable across the whole deck at a glance.
+        if face.status_color is not None:
+            draw.rectangle((0, 0, width, max(3, height // 18)), fill=face.status_color)
+
+        if face.mark:
+            mark_font = self._font(max(9, int(height * 0.36 * face.mark_scale)))
             draw.text(
-                (width / 2, height / 2 - (7 if face.sublabel else 0)),
-                face.label,
-                font=font,
+                (width / 2, height / 2 - height * 0.06),
+                face.mark,
+                font=mark_font,
                 anchor="mm",
-                fill=face.text_color,
-            )
-        if face.sublabel:
-            draw.text(
-                (width / 2, height / 2 + 10),
-                face.sublabel,
-                font=small,
-                anchor="mm",
-                fill=face.text_color,
+                fill=face.mark_color,
             )
 
-        # to_native_format is deprecated since 0.9.5 and already returns bytes.
+        if face.badge:
+            self._draw_badge(draw, face.badge, width, height)
+
+        # to_native_format is deprecated since 0.9.5; this already returns bytes.
         native: bytes = PILHelper.to_native_key_format(deck, source)
         return native
+
+    def _draw_badge(self, draw: object, text: str, width: int, height: int) -> None:
+        """Name badge inset from the lower-right corner."""
+        from PIL import ImageDraw
+
+        assert isinstance(draw, ImageDraw.ImageDraw)
+        font = self._font(max(8, int(height * 0.15)))
+
+        # Trim to what actually fits rather than letting it run off the key.
+        margin = int(width * 0.07)
+        usable = width - 2 * margin - 6
+        label = text
+        while label and draw.textlength(label, font=font) > usable:
+            label = label[:-1]
+        if not label:
+            return
+        if label != text and len(label) > 1:
+            label = label[:-1] + "…"
+
+        text_width = draw.textlength(label, font=font)
+        pad_x, pad_y = 4, 2
+        right = width - margin
+        bottom = height - margin
+        left = right - text_width - 2 * pad_x
+        top = bottom - int(height * 0.15) - 2 * pad_y
+
+        draw.rounded_rectangle((left, top, right, bottom), radius=3, fill=BADGE_FILL)
+        draw.text(
+            ((left + right) / 2, (top + bottom) / 2),
+            label,
+            font=font,
+            anchor="mm",
+            fill=BADGE_TEXT,
+        )
 
 
 def open_surface(*, use_device: bool = True, serial: str | None = None) -> ButtonSurface:

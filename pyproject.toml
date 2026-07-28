@@ -60,3 +60,7 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+# U+2032 PRIME is deliberate: it is the "prime" in omp's pi-prime mark, and
+# reads correctly where an ASCII apostrophe sits too low and looks like a typo.
+allowed-confusables = ["′"]

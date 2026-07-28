@@ -9,12 +9,22 @@ coloured by agent status; press a key to focus that pane.
 Elgato's own software is **not** required — this speaks raw HID directly. On
 macOS it must not be running, since it claims the device exclusively.
 
+Columns are workspaces in sidebar order, rows are that workspace's panes.
+There is no stored layout: herdr's current arrangement is the source of truth,
+so the deck always matches what the sidebar shows.
+
 ```
-┌──────────┬──────────┬──────────┐
-│ claude   │ codex    │ claude   │
-│ working  │ idle     │ blocked  │   amber = busy   grey = idle
-└──────────┴──────────┴──────────┘   green = done   red  = needs input
+  diggy      codex      diggy    herdr-sd
+┌─────────┬─────────┬─────────┬─────────┬─────────┐
+│  ▔▔▔▔▔  │  ▔▔▔▔▔  │  ▔▔▔▔▔  │  ▔▔▔▔▔  │         │  ← status strip
+│    ✳    │    C    │    ✳    │    ✳    │         │  ← agent mark
+│    ⌐review│       │         │   ⌐api  │         │  ← name badge
+├─────────┼─────────┼─────────┼─────────┼─────────┤
+│    ✳    │         │         │    π′   │         │
+└─────────┴─────────┴─────────┴─────────┴─────────┘
 ```
+
+amber = working · red = blocked · green = done · grey = idle
 
 ## Status
 
@@ -43,7 +53,7 @@ herdr plugin link .
 during development, run the daemon by hand:
 
 ```bash
-uv run herdr-streamdeck --no-device --all-panes -v   # no hardware required
+uv run herdr-streamdeck --no-device -v               # no hardware required
 uv run herdr-streamdeck                              # with a device
 ```
 
@@ -69,7 +79,7 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 53 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 97 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```

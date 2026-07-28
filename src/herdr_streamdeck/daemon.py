@@ -12,6 +12,12 @@ Two threading notes drive the structure here:
   full pane object. That avoids maintaining a per-pane
   ``pane.agent_status_changed`` subscription per pane and re-subscribing as
   panes come and go.
+
+Layout mirrors herdr rather than storing anything: columns follow
+``workspace.list`` (sidebar order) and rows follow ``pane.list`` (a depth-first
+walk of the tab's split tree). Events are split into *structural* ones, which
+can reorder things and so trigger a re-read, and *cosmetic* ones, which only
+change a pane in place. See ``STRUCTURAL_EVENTS``.
 """
 
 from __future__ import annotations
@@ -22,12 +28,13 @@ import contextlib
 import logging
 import signal
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from .client import HerdrSession
 from .deck import RGB, ButtonFace, ButtonSurface, open_surface
+from .icons import mark_for
+from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
 from .protocol import Event, HerdrError, JSONObject, subscription
 
 logger = logging.getLogger("herdr_streamdeck")
@@ -44,15 +51,37 @@ SUBSCRIPTIONS = (
     "tab.focused",
 )
 
+# Drawn as a strip along the top edge, so the key field itself stays neutral.
 STATUS_COLORS: dict[str, RGB] = {
-    "working": (180, 95, 6),  # amber -- busy
-    "blocked": (153, 27, 27),  # red   -- needs input
-    "done": (21, 128, 61),  # green -- finished, unseen
-    "idle": (39, 39, 42),  # grey  -- waiting, seen
-    "unknown": (24, 24, 27),
+    "working": (217, 132, 24),  # amber -- busy
+    "blocked": (204, 44, 44),  # red   -- needs input
+    "done": (34, 168, 82),  # green -- finished, unseen
+    "idle": (82, 82, 91),  # grey  -- waiting, seen
 }
 
-IDLE_FACE = ButtonFace(label="", color=(16, 16, 18))
+EMPTY_FACE = ButtonFace(background=(20, 20, 23))
+"""An unoccupied key: darker than the neutral field, and inert."""
+
+# Events that can change *which* pane sits where, as opposed to merely
+# restyling one. These trigger a re-read of herdr's ordering, since neither
+# workspace order nor split-tree order can be derived from a pane record.
+STRUCTURAL_EVENTS = frozenset(
+    {
+        "pane.created",
+        "pane.closed",
+        "pane.exited",
+        "pane.moved",
+        "pane.agent_detected",
+        "tab.created",
+        "tab.closed",
+        "tab.moved",
+        "workspace.created",
+        "workspace.closed",
+        "workspace.moved",
+        "workspace.focused",
+        "layout.updated",
+    }
+)
 
 
 class HerdrLike(Protocol):
@@ -71,44 +100,6 @@ class HerdrLike(Protocol):
     def events(self) -> AsyncIterator[Event]: ...
 
 
-@dataclass(slots=True)
-class Pane:
-    """The bits of a pane record the deck cares about."""
-
-    pane_id: str
-    label: str = ""
-    agent: str = ""
-    status: str = "unknown"
-    workspace_id: str = ""
-
-    @classmethod
-    def from_record(cls, record: JSONObject) -> Pane | None:
-        pane_id = record.get("pane_id")
-        if not isinstance(pane_id, str):
-            return None
-
-        def text(key: str) -> str:
-            value = record.get(key)
-            return value if isinstance(value, str) else ""
-
-        return cls(
-            pane_id=pane_id,
-            label=text("label"),
-            agent=text("agent"),
-            status=text("agent_status") or "unknown",
-            workspace_id=text("workspace_id"),
-        )
-
-    @property
-    def display(self) -> str:
-        """Short label for the key face."""
-        if self.label:
-            return self.label[:9]
-        if self.agent:
-            return self.agent[:9]
-        return self.pane_id
-
-
 class DeckController:
     """Keeps the button surface in sync with herdr's pane state."""
 
@@ -117,22 +108,29 @@ class DeckController:
         client: HerdrLike,
         surface: ButtonSurface,
         *,
-        agents_only: bool = True,
+        mode: GroupingMode = GroupingMode.WORKSPACE,
         reconcile_interval: float = 60.0,
     ) -> None:
         self._client = client
         self._surface = surface
-        self._agents_only = agents_only
+        self._mode = mode
         self._reconcile_interval = reconcile_interval
+        # Insertion order matters: it is herdr's pane order, and sorting it
+        # would replace herdr's arrangement with ours.
         self._panes: dict[str, Pane] = {}
-        self._slots: list[str] = []
+        self._order: list[GroupKey] = []
+        self._columns: list[Group | None] = []
+        self._focused_workspace = ""
         self._loop: asyncio.AbstractEventLoop | None = None
         self._dirty = asyncio.Event()
+        self._restructure = False
+
+    @property
+    def grid(self) -> Grid:
+        rows, columns = self._surface.key_layout
+        return Grid(rows=rows, columns=columns)
 
     # ------------------------------------------------------------------- state
-
-    def _tracked(self, pane: Pane) -> bool:
-        return bool(pane.agent) if self._agents_only else True
 
     def _upsert(self, record: JSONObject) -> bool:
         pane = Pane.from_record(record)
@@ -141,33 +139,42 @@ class DeckController:
         existing = self._panes.get(pane.pane_id)
         if existing == pane:
             return False
-        # A pane.updated for an untracked pane may be the first sighting of an
-        # agent, so re-evaluate rather than filtering on arrival.
         self._panes[pane.pane_id] = pane
         return True
 
     def _remove(self, pane_id: str) -> bool:
         return self._panes.pop(pane_id, None) is not None
 
-    def _assign_slots(self) -> None:
-        """Map panes onto keys, stable by pane id so buttons do not shuffle."""
-        visible = sorted(p.pane_id for p in self._panes.values() if self._tracked(p))
-        self._slots = visible[: self._surface.key_count]
+    def _rebuild_columns(self) -> None:
+        """Recompute columns from the current model, preserving herdr's order."""
+        self._columns = build_columns(
+            list(self._panes.values()),
+            self._order,
+            self.grid,
+            self._mode,
+            workspace_id=self._focused_workspace,
+        )
 
     # ------------------------------------------------------------------ drawing
 
+    def face_for(self, pane: Pane | None) -> ButtonFace:
+        """The face for one key."""
+        if pane is None:
+            return EMPTY_FACE
+        mark = mark_for(pane.mark_key)
+        return ButtonFace(
+            mark=mark.glyph,
+            mark_color=mark.color,
+            mark_scale=mark.scale,
+            badge=pane.badge,
+            status_color=STATUS_COLORS.get(pane.status),
+        )
+
     def repaint(self) -> None:
-        self._assign_slots()
+        self._rebuild_columns()
+        grid = self.grid
         for index in range(self._surface.key_count):
-            if index < len(self._slots):
-                pane = self._panes[self._slots[index]]
-                face = ButtonFace(
-                    label=pane.display,
-                    sublabel=pane.status if pane.status != "unknown" else "",
-                    color=STATUS_COLORS.get(pane.status, STATUS_COLORS["unknown"]),
-                )
-            else:
-                face = IDLE_FACE
+            face = self.face_for(grid.pane_at(self._columns, index))
             with contextlib.suppress(Exception):
                 # A single failed key must not abort the whole repaint.
                 self._surface.set_face(index, face)
@@ -184,10 +191,11 @@ class DeckController:
         loop.call_soon_threadsafe(self._dispatch_press, index)
 
     def _dispatch_press(self, index: int) -> None:
-        if not 0 <= index < len(self._slots):
-            logger.debug("key %d pressed but mapped to no pane", index)
+        pane = self.grid.pane_at(self._columns, index)
+        if pane is None:
+            logger.debug("key %d pressed but maps to no pane", index)
             return
-        pane_id = self._slots[index]
+        pane_id = pane.pane_id
         logger.info("key %d pressed -> focusing %s", index, pane_id)
         task = asyncio.create_task(self._focus(pane_id), name=f"focus-{pane_id}")
         # Hold a reference so the task is not garbage collected mid-flight.
@@ -240,39 +248,85 @@ class DeckController:
             logger.debug("discarded %d replayed events", discarded)
         return discarded
 
-    async def prime(self) -> None:
-        """Seed state from a snapshot, which is authoritative over the stream."""
-        snapshot = await self._client.snapshot()
-        live = {record["pane_id"] for record in _iter_panes(snapshot)}
+    async def read_order(self) -> tuple[list[GroupKey], str]:
+        """Ask herdr for its column order, and which workspace is focused.
 
+        Neither is derivable from a pane record: sidebar order lives only in
+        ``workspace.list`` (the order ``workspace.move`` rearranges), and tab
+        order only in ``tab.list``.
+        """
+        listing = await self._client.request("workspace.list")
+        workspaces = listing.get("workspaces")
+        focused = ""
+        order: list[GroupKey] = []
+
+        if isinstance(workspaces, list):
+            for item in workspaces:
+                if not isinstance(item, dict):
+                    continue
+                ws_id = item.get("workspace_id")
+                if not isinstance(ws_id, str):
+                    continue
+                if item.get("focused"):
+                    focused = ws_id
+                if self._mode is GroupingMode.WORKSPACE:
+                    label = item.get("label")
+                    order.append(
+                        GroupKey(id=ws_id, label=label if isinstance(label, str) else ws_id)
+                    )
+
+        if self._mode is GroupingMode.TAB:
+            tabs = (await self._client.request("tab.list", {"workspace_id": focused})).get(
+                "tabs"
+            )
+            if isinstance(tabs, list):
+                for item in tabs:
+                    if not isinstance(item, dict):
+                        continue
+                    tab_id = item.get("tab_id")
+                    if not isinstance(tab_id, str):
+                        continue
+                    label = item.get("label")
+                    order.append(
+                        GroupKey(id=tab_id, label=label if isinstance(label, str) else tab_id)
+                    )
+
+        return order, focused
+
+    async def prime(self) -> None:
+        """Re-read herdr's arrangement. Snapshot and listing are the truth.
+
+        The pane map is rebuilt rather than patched, so its iteration order is
+        exactly the snapshot's -- which is herdr's split-tree order. Patching
+        would leave panes wherever they were first seen.
+        """
+        order, focused = await self.read_order()
+        snapshot = await self._client.snapshot()
+
+        self._panes = {}
         for record in _iter_panes(snapshot):
             self._upsert(record)
-
-        # Reconciliation: anything we believe in that the snapshot omits is
-        # gone. Makes prime() safe to call repeatedly as a self-heal.
-        for pane_id in [p for p in self._panes if p not in live]:
-            logger.debug("reconcile: dropping stale pane %s", pane_id)
-            self._remove(pane_id)
+        self._order = order
+        self._focused_workspace = focused
 
         self.repaint()
 
     def handle(self, event: Event) -> None:
-        changed = False
-        data = event.data
+        """Fold one event into the model.
 
-        if event.kind in {"pane.created", "pane.updated", "pane.agent_detected"}:
-            # pane.agent_detected carries only ids, with no pane object; the
-            # pane.updated that follows it supplies the detail.
-            pane_record = data.get("pane")
-            if isinstance(pane_record, dict):
-                changed = self._upsert(pane_record)
-        elif event.kind in {"pane.closed", "pane.exited"}:
-            pane_id = data.get("pane_id")
-            if isinstance(pane_id, str):
-                changed = self._remove(pane_id)
-
-        if changed:
+        Structural events only *schedule* a re-read: ordering cannot be
+        recovered from the event payload, so the model is rebuilt from herdr
+        rather than guessed at here.
+        """
+        if event.kind in STRUCTURAL_EVENTS:
+            self._restructure = True
             self._dirty.set()
+            return
+
+        if event.kind == "pane.updated":
+            record = event.data.get("pane")
+            if isinstance(record, dict) and self._upsert(record):
+                self._dirty.set()
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -319,11 +373,18 @@ class DeckController:
                 logger.warning("reconcile failed", exc_info=True)
 
     async def _paint_loop(self) -> None:
-        """Coalesce bursts of events into at most one repaint per interval."""
+        """Coalesce bursts of events into at most one update per interval."""
         while True:
             await self._dirty.wait()
             self._dirty.clear()
-            self.repaint()
+            if self._restructure:
+                self._restructure = False
+                try:
+                    await self.prime()
+                except Exception:
+                    logger.warning("could not re-read layout", exc_info=True)
+            else:
+                self.repaint()
             await asyncio.sleep(0.05)
 
 
@@ -412,7 +473,7 @@ async def amain(argv: list[str] | None = None) -> int:
     client = HerdrSession(Path(args.socket) if args.socket else None)
     await client.connect()
 
-    controller = DeckController(client, surface, agents_only=not args.all_panes)
+    controller = DeckController(client, surface, mode=GroupingMode(args.mode))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -447,9 +508,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="run against an in-memory surface; no hardware required",
     )
     parser.add_argument(
-        "--all-panes",
-        action="store_true",
-        help="show every pane, not only those with a detected agent",
+        "--mode",
+        choices=[m.value for m in GroupingMode],
+        default=GroupingMode.WORKSPACE.value,
+        help=(
+            "what a column represents: 'workspace' (sidebar order) or 'tab' "
+            "(tabs of the focused workspace). Default: workspace"
+        ),
     )
     parser.add_argument(
         "--probe",
