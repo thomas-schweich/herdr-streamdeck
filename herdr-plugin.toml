@@ -1,0 +1,29 @@
+id                = "herdr-streamdeck"
+name              = "Stream Deck"
+version           = "0.1.0"
+min_herdr_version = "0.7.5"
+description       = "Drive an Elgato Stream Deck from herdr's socket API"
+
+# Windows is omitted deliberately: herdr runs under WSL there, and the device
+# is passed through to the Linux side by usbipd (see docs/setup.md).
+platforms = ["linux", "macos"]
+
+# Run at install time. Must not modify this manifest -- herdr aborts the
+# install if the build step rewrites herdr-plugin.toml.
+[[build]]
+command = ["uv", "sync", "--no-dev", "--frozen"]
+
+# Launched at herdr server start. Note this does NOT fire on `plugin link`,
+# so during development run the daemon by hand instead:
+#     uv run herdr-streamdeck --no-device -v
+[[startup]]
+command = ["uv", "run", "--no-dev", "--frozen", "herdr-streamdeck"]
+
+# Fork-per-invocation, so only cheap one-shot work belongs here. The daemon's
+# own state is not reachable from an action -- it is a separate process.
+[[actions]]
+id          = "probe-device"
+title       = "Stream Deck: probe device"
+description = "List attached Stream Decks and exit"
+command     = ["uv", "run", "--no-dev", "--frozen", "herdr-streamdeck", "--probe"]
+contexts    = ["global"]
