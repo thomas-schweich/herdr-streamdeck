@@ -1,5 +1,7 @@
 # herdr-streamdeck
 
+[![CI](https://github.com/thomas-schweich/herdr-streamdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/thomas-schweich/herdr-streamdeck/actions/workflows/ci.yml)
+
 Drive an [Elgato Stream Deck](https://www.elgato.com/stream-deck) from
 [herdr](https://github.com/herdr/herdr)'s socket API. One key per agent pane,
 coloured by agent status; press a key to focus that pane.
@@ -72,9 +74,14 @@ uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
-Tests run without hardware or herdr. `tests/test_integration.py` additionally
-exercises a live server when `HERDR_SOCKET_PATH` (or the XDG default) exists,
-and pins the protocol quirks documented below.
+Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
+skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
+XDG default); the other 47 run anywhere, and pin the protocol quirks documented
+below.
+
+CI additionally covers what this machine cannot: macOS (the primary target),
+`shellcheck` on the setup scripts, `PSScriptAnalyzer` on the PowerShell, and
+structural validation of `herdr-plugin.toml`.
 
 ## Docs
 
