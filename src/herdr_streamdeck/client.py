@@ -19,7 +19,7 @@ import contextlib
 import itertools
 import os
 import sys
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from pathlib import Path
 from types import TracebackType
 
@@ -92,7 +92,8 @@ class HerdrClient:
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._pending: dict[str, asyncio.Future[Response]] = {}
-        self._events: asyncio.Queue[Event] = asyncio.Queue(maxsize=event_queue_size)
+        # None is a sentinel meaning "stream finished"; see events().
+        self._events: asyncio.Queue[Event | None] = asyncio.Queue(maxsize=event_queue_size)
         self._ids = itertools.count(1)
         self._closed = asyncio.Event()
         self._dropped_events = 0
@@ -142,6 +143,7 @@ class HerdrClient:
         self._reader = None
 
         self._fail_pending(ConnectionClosed("client closed"))
+        self._end_event_stream()
 
     async def __aenter__(self) -> HerdrClient:
         await self.connect()
@@ -185,6 +187,16 @@ class HerdrClient:
             # prefer the uncorrelatable error we just saw.
             self._fail_pending(self._last_unmatched_error or exc)
             self._closed.set()
+            self._end_event_stream()
+
+    def _end_event_stream(self) -> None:
+        """Wake any consumer of events() and tell it the stream is over."""
+        if self._events.full():
+            # Make room; the sentinel matters more than the oldest event.
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._events.get_nowait()
+        with contextlib.suppress(asyncio.QueueFull):
+            self._events.put_nowait(None)
 
     def _dispatch(self, line: bytes) -> None:
         try:
@@ -267,24 +279,20 @@ class HerdrClient:
 
     # -------------------------------------------------------------------- events
 
-    async def events(self) -> AsyncIterator[Event]:
-        """Yield subscription events until the connection closes."""
-        while True:
-            getter = asyncio.ensure_future(self._events.get())
-            closed = asyncio.ensure_future(self._closed.wait())
-            done, _ = await asyncio.wait({getter, closed}, return_when=asyncio.FIRST_COMPLETED)
-            if getter in done:
-                closed.cancel()
-                yield getter.result()
-                continue
+    async def events(self) -> AsyncGenerator[Event, None]:
+        """Yield subscription events until the connection closes.
 
-            getter.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await getter
-            # Drain anything already queued before giving up.
-            while not self._events.empty():
-                yield self._events.get_nowait()
-            return
+        A single queue read, woken by a None sentinel on close. An earlier
+        version raced a queue read against a close event using two tasks per
+        iteration; abandoning the generator mid-wait -- which happens whenever
+        the stream is swapped to resubscribe -- left those tasks pending and
+        produced "Task was destroyed but it is pending" on every reconnect.
+        """
+        while True:
+            item = await self._events.get()
+            if item is None:
+                return
+            yield item
 
 
 class HerdrSession:
@@ -369,8 +377,14 @@ class HerdrSession:
     async def events(self) -> AsyncIterator[Event]:
         """Yield events, transparently reopening the stream on resubscribe."""
         while True:
-            async for event in self._stream.events():
-                yield event
+            inner = self._stream.events()
+            try:
+                async for event in inner:
+                    yield event
+            finally:
+                # Finalise explicitly: leaving it to the garbage collector is
+                # what leaks the queue read on a stream swap.
+                await inner.aclose()
 
             if not self._swapping:
                 return  # the server really did go away

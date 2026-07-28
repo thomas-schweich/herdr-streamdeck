@@ -227,3 +227,40 @@ async def test_overlong_socket_path_is_reported_clearly() -> None:
             await HerdrClient(deep).connect()
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+async def test_event_stream_ends_when_the_client_closes(
+    server: Callable[[Handler], Awaitable[Path]],
+) -> None:
+    """Must end promptly and leave nothing pending.
+
+    An earlier version raced a queue read against a close event using two
+    tasks per iteration, which leaked "Task was destroyed but it is pending"
+    every time the stream was swapped to resubscribe.
+    """
+
+    async def handler(request: JSONObject) -> list[JSONObject]:
+        return [{"id": request["id"], "result": {"type": "subscription_started"}}]
+
+    path = await server(handler)
+    client = HerdrClient(path)
+    await client.connect()
+    await client.subscribe([{"type": "pane.created"}])
+
+    received: list[str] = []
+
+    async def consume() -> None:
+        async for event in client.events():
+            received.append(event.kind)
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    await client.close()
+
+    await asyncio.wait_for(task, timeout=2)
+    assert received == []
+
+    lingering = [
+        t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()
+    ]
+    assert lingering == [], f"left tasks pending: {lingering}"
