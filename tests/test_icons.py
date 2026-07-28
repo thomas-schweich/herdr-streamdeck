@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from herdr_streamdeck.icons import MARKS, UNKNOWN, mark_for, normalise
+from herdr_streamdeck.icons import MARKS, TERMINAL, mark_for, normalise
 
 
 def test_requested_marks() -> None:
@@ -54,7 +54,11 @@ def test_every_herdr_agent_has_a_mark() -> None:
 
 
 def test_marks_render_in_dejavu() -> None:
-    """A glyph the fallback font lacks would draw as tofu."""
+    """A glyph the fallback font lacks would draw as tofu.
+
+    Covers TERMINAL as well as MARKS: an earlier version checked only MARKS,
+    and the terminal mark -- which lives outside it -- went unverified.
+    """
     fonttools = pytest.importorskip("fontTools.ttLib")
     from pathlib import Path
 
@@ -63,7 +67,8 @@ def test_marks_render_in_dejavu() -> None:
         pytest.skip("DejaVu not installed on this platform")
 
     cmap = fonttools.TTFont(str(font_path)).getBestCmap()
-    for name, mark in MARKS.items():
+    everything = {**MARKS, "<terminal>": TERMINAL}
+    for name, mark in everything.items():
         missing = [c for c in mark.glyph if ord(c) not in cmap]
         assert not missing, f"{name}: {missing!r} absent from DejaVu"
 
@@ -88,10 +93,24 @@ def test_unknown_agent_falls_back_to_an_initial() -> None:
     assert mark_for("newthing").glyph == "N"
 
 
-def test_absent_agent_gets_the_unknown_dot() -> None:
-    assert mark_for(None) is UNKNOWN
-    assert mark_for("") is UNKNOWN
-    assert UNKNOWN.glyph not in {m.glyph for m in MARKS.values()}
+def test_a_pane_with_no_agent_is_marked_as_a_terminal() -> None:
+    """A shell is a normal thing to switch to, not an absence."""
+    assert mark_for(None) is TERMINAL
+    assert mark_for("") is TERMINAL
+    assert TERMINAL.glyph == "$_"
+
+
+def test_terminal_does_not_collide_with_any_agent() -> None:
+    """Codex's real logo is a cloud containing >_, hence $_ here."""
+    assert TERMINAL.glyph not in {m.glyph for m in MARKS.values()}
+    assert TERMINAL.glyph != mark_for("codex").glyph
+
+
+def test_terminals_stay_legible() -> None:
+    """They are actionable targets, so they must not be dimmed into absence."""
+    from herdr_streamdeck.animation import LEGIBLE_FLOOR, animation_for
+
+    assert animation_for("unknown").high >= LEGIBLE_FLOOR
 
 
 def test_long_marks_are_scaled_down() -> None:

@@ -40,6 +40,9 @@ in the project and so useless for telling them apart:
 | `ENG-4521-refactor` | `refactor` | a description beats a number |
 | `reviewer` | `reviewer` | not a ticket, and it fits |
 
+Panes with no detected agent are plain terminals, marked `$_` and fully
+switchable — pressing the key focuses the shell like any other pane.
+
 Agent marks are typographic by default. Drop a PNG named after the agent into
 `$HERDR_PLUGIN_CONFIG_DIR/icons/` (e.g. `claude.png`) to use your own artwork
 instead.
@@ -97,7 +100,7 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 161 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 163 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```

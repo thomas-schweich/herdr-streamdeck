@@ -106,9 +106,9 @@ STATUS_ANIMATIONS: dict[str, Animation] = {
     "blocked": Animation(Waveform.BLINK, low=LEGIBLE_FLOOR, high=1.0, period=1.0),
 }
 
-# A pane with no detected agent shows only a dot, so it can sit below the
-# legibility floor: there is nothing there worth reading.
-UNKNOWN_ANIMATION = Animation(Waveform.STEADY, low=0.45, high=0.45)
+# A pane with no detected agent is a terminal -- a normal thing to switch to,
+# so it stays at the legibility floor rather than being dimmed into an absence.
+UNKNOWN_ANIMATION = Animation(Waveform.STEADY, low=LEGIBLE_FLOOR, high=LEGIBLE_FLOOR)
 EMPTY_ANIMATION = Animation(Waveform.STEADY, high=1.0)
 """Empty keys are already dark by their face; do not dim them further."""
 

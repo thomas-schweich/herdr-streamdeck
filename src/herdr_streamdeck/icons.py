@@ -45,6 +45,8 @@ class AgentMark:
 # `qwencode` is absent from that enum, so herdr never reports it -- but
 # `display_agent` accepts arbitrary strings, so a wrapper can self-report and
 # still land on a mark here. See Pane.mark_key.
+# Codex is `C` rather than a `>_`-style mark for the same reason TERMINAL is
+# `$_`: the two must stay visually distinct.
 MARKS: dict[str, AgentMark] = {
     # U+2733 eight-spoked asterisk, echoing Anthropic's starburst.
     "claude": AgentMark("✳", (217, 119, 87), 1.5),
@@ -67,8 +69,17 @@ MARKS: dict[str, AgentMark] = {
     "mastracode": AgentMark("M", (230, 140, 170), 1.4),
 }
 
-UNKNOWN = AgentMark("·", (110, 110, 118), 1.6)
-"""No agent detected. A dot, not a letter, so it never reads as a real mark."""
+TERMINAL = AgentMark("$_", (150, 152, 160), 1.05)
+"""A pane with no detected agent: a plain shell.
+
+Not an absence to be greyed out -- switching to a terminal is a normal thing
+to want from the deck, so it gets a real mark and stays legible.
+
+``$_`` rather than ``>_`` deliberately: Codex's own logo is a cloud containing
+``>_``, and a terminal key must not read as a Codex key.
+
+Replaces an earlier middle dot, which at 41px rendered as a small featureless
+square -- present in the font, but meaningless on the key."""
 
 
 def normalise(agent: str | None) -> str:
@@ -86,12 +97,13 @@ def mark_for(agent: str | None) -> AgentMark:
     """The mark for an agent, falling back sensibly for unknown ones.
 
     An unrecognised but non-empty agent gets its capitalised initial rather
-    than the unknown dot -- it is still more informative than nothing, and
-    makes a newly supported agent visible before it has a hand-tuned mark.
+    than the terminal mark -- it is still more informative than nothing, and
+    makes a newly supported agent visible before it has a hand-tuned mark. An
+    *empty* agent is a real terminal, which is a different thing entirely.
     """
     key = normalise(agent)
     if not key:
-        return UNKNOWN
+        return TERMINAL
     known = MARKS.get(key)
     if known is not None:
         return known

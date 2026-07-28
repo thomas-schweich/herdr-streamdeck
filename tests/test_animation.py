@@ -69,11 +69,14 @@ def test_blocked_swings_wider_than_working_pulses() -> None:
     assert (blocked.high - blocked.low) > (working.high - working.low)
 
 
-def test_unknown_status_is_steady_and_dim() -> None:
-    """No agent means nothing to read, so it may sit below the floor."""
+def test_unknown_status_is_steady_but_still_legible() -> None:
+    """A pane with no detected agent is a terminal, and switching to a shell
+    is a normal thing to want -- so it stays readable rather than being
+    dimmed into an absence."""
     unknown = animation_for("nonsense")
     assert unknown.waveform is Waveform.STEADY
-    assert unknown.high < LEGIBLE_FLOOR
+    assert unknown.high >= LEGIBLE_FLOOR
+    assert unknown.high < 1.0, "still quieter than an agent that finished"
 
 
 def test_working_and_blocked_use_different_periods() -> None:
