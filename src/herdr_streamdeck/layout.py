@@ -109,6 +109,7 @@ class Pane:
     tab_id: str = ""
     label: str = ""
     title: str = ""
+    terminal_title: str = ""
     agent: str = ""
     display_agent: str = ""
     status: str = "unknown"
@@ -129,6 +130,11 @@ class Pane:
             tab_id=text("tab_id"),
             label=text("label"),
             title=text("title"),
+            # `_stripped` has the agent's own status glyph removed -- the raw
+            # `terminal_title` reads "✳ orchestrator", and that leading
+            # mark is both redundant with the one we draw and wide enough to
+            # cost two of the eight badge characters.
+            terminal_title=text("terminal_title_stripped") or text("terminal_title"),
             agent=text("agent"),
             display_agent=text("display_agent"),
             status=text("agent_status") or "unknown",
@@ -146,8 +152,15 @@ class Pane:
 
     @property
     def badge(self) -> str:
-        """Text for the corner badge: the most specific name, abbreviated."""
-        return abbreviate(self.title or self.label or "")
+        """Text for the corner badge: the most specific name, abbreviated.
+
+        ``terminal_title`` is what herdr actually populates -- ``title`` and
+        ``label`` are absent from every pane record observed at protocol 17.
+        They are kept ahead of it because they are the explicit, user-set
+        names when they do appear, whereas the terminal title is whatever the
+        shell or agent last wrote.
+        """
+        return abbreviate(self.title or self.label or self.terminal_title or "")
 
 
 @dataclass(frozen=True, slots=True)

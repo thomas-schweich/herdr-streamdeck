@@ -143,23 +143,70 @@ and `snapshot.panes[]`. A naive walk therefore visits agent panes twice (13
 records for 7 panes). `_iter_panes` keys by `pane_id` and keeps the richer
 record.
 
-### Getting agent status without per-pane subscriptions
+### Agent status requires per-pane subscriptions
 
-`pane.agent_status_changed` is pane-scoped, so tracking every pane would mean
-subscribing per pane and re-subscribing as panes come and go.
+`pane.agent_status_changed` is pane-scoped, so tracking every pane means
+subscribing per pane and re-subscribing as panes come and go. There is no way
+around it.
 
-Not necessary: the **global** `pane.updated` event carries a full pane record
-including `agent_status`. Observed directly —
+The tempting shortcut does not work. The **global** `pane.updated` event
+carries a full pane record whose payload includes an `agent_status` field, so
+it looks like one global subscription would be enough. It is not: `pane.updated`
+does not *fire* on a status transition. Verified by driving transitions with
+`pane.report_agent` and watching both subscriptions — only
+`pane.agent_status_changed` arrived. Relying on the global event left status
+refreshing only on the 60-second reconcile.
 
-```
-pane_updated pane=w6:p1 status=idle
-```
-
-So one global subscription tracks status across every pane. This is what the
-daemon does.
+So the daemon holds one `pane.agent_status_changed` subscription per live pane,
+rebuilt whenever the pane set changes. Since herdr serves one request per
+connection, that rebuild needs a fresh connection — see
+`HerdrSession.resubscribe`.
 
 `pane.agent_detected` is global but carries only ids, with no pane object; the
 `pane.updated` that follows supplies the detail.
+
+### Where a pane's name lives
+
+A pane record at protocol 17 carries these keys, and **absent optional fields
+are omitted rather than sent as null**:
+
+```
+pane_id  terminal_id  workspace_id  tab_id  focused  cwd  foreground_cwd
+agent  terminal_title  terminal_title_stripped  agent_status  agent_session
+scroll  revision
+[label]
+```
+
+`label` is the user-set name, written by `pane.rename` and absent until it is.
+There is no `title` and no `display_agent` — both are accepted by our parser as
+forward compatibility, but neither has ever been observed.
+
+That omission is what made badges silently blank: reading only `title`/`label`
+is correct but yields nothing on a session where no pane has been renamed,
+which is every session by default. The fallback is **`terminal_title`**, which
+is always populated, with `terminal_title_stripped` being the same string minus
+the agent's own leading status glyph:
+
+```
+terminal_title           "✳ orchestrator"
+terminal_title_stripped  "orchestrator"
+```
+
+Prefer the stripped form — the glyph duplicates the agent mark the deck already
+draws, and is wide enough to cost two of the eight badge characters. Note the
+glyph is the agent's *spinner*, so it changes frame to frame (`⠂`, `✳`, …);
+matching on the raw title would churn.
+
+### `pane.rename` emits no event
+
+herdr has `tab.renamed` and `workspace.renamed` events, but no `pane.renamed` —
+and renaming a pane does not fire `pane.updated` either. Verified by holding a
+`pane.updated` + `pane.focused` subscription across a `pane.rename` call: 31
+events arrived, all `pane.focused`, none carrying the new label.
+
+So a pane rename is invisible until the next periodic reconcile, which bounds
+the delay at `--reconcile-interval` (60 s). This is the one piece of state the
+event stream cannot keep current.
 
 ## Snapshot shape
 

@@ -254,6 +254,40 @@ def test_badge_prefers_title_over_label() -> None:
     assert pane.badge == "deployme"
 
 
+def test_badge_falls_back_to_the_terminal_title() -> None:
+    """What herdr actually populates. `title` and `label` appear in no pane
+    record at protocol 17, so reading only those left every badge blank."""
+    pane = Pane(pane_id="p1", terminal_title="orchestrator")
+    assert pane.badge == "orchestr"
+
+
+def test_explicit_names_still_win_over_the_terminal_title() -> None:
+    """The terminal title is whatever the shell last wrote, so a name the user
+    set deliberately takes precedence."""
+    pane = Pane(pane_id="p1", title="reviewer", terminal_title="bash")
+    assert pane.badge == "reviewer"
+
+
+def test_the_stripped_terminal_title_is_the_one_read() -> None:
+    """The raw title carries the agent's own status glyph, which duplicates
+    the mark and eats badge width."""
+    pane = Pane.from_record(
+        {
+            "pane_id": "p1",
+            "terminal_title": "✳ orchestrator",
+            "terminal_title_stripped": "orchestrator",
+        }
+    )
+    assert pane is not None
+    assert pane.badge == "orchestr"
+
+
+def test_the_raw_terminal_title_is_used_when_nothing_stripped_it() -> None:
+    pane = Pane.from_record({"pane_id": "p1", "terminal_title": "reviewer"})
+    assert pane is not None
+    assert pane.badge == "reviewer"
+
+
 def test_ticket_badges_stay_distinct_within_a_project() -> None:
     """The point of the rule: same prefix must not collapse to one badge."""
     names = ["ENG-4521", "ENG-4522", "ENG-4523-authentication", "ENG-4524-caching"]
