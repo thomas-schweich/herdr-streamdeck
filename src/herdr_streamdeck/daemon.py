@@ -43,6 +43,7 @@ from .deck import RGB, ButtonFace, ButtonSurface, KeyFrames, open_surface
 from .icons import mark_for, resolve_override
 from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
 from .protocol import Event, HerdrError, JSONObject, subscription
+from .theme import ThemeName, theme_for
 
 logger = logging.getLogger("herdr_streamdeck")
 
@@ -72,9 +73,6 @@ ANIMATION_FPS = 20
 A 15-key refresh measured 25 ms (1.34 ms a key), so 20 fps leaves ample
 headroom even in the worst case where every key animates -- and writes are
 skipped when the level is unchanged, so the usual cost is far lower."""
-
-EMPTY_FACE = ButtonFace(background=(20, 20, 23))
-"""An unoccupied key: darker than the neutral field, and inert."""
 
 # Events that can change *which* pane sits where, as opposed to merely
 # restyling one. These trigger a re-read of herdr's ordering, since neither
@@ -183,16 +181,18 @@ class DeckController:
     def face_for(self, pane: Pane | None) -> ButtonFace:
         """The face for one key."""
         if pane is None:
-            return EMPTY_FACE
+            return ButtonFace(background=self._surface.theme.empty_background)
+        theme = self._surface.theme
         mark = mark_for(pane.mark_key)
         return ButtonFace(
             mark=mark.glyph,
-            mark_color=mark.color,
+            mark_color=theme.mark_color(mark.color),
             mark_scale=mark.scale,
             # A user PNG in the plugin config dir replaces the glyph.
             icon=resolve_override(pane.mark_key),
             badge=pane.badge,
             status_color=STATUS_COLORS.get(pane.status),
+            background=theme.background,
         )
 
     def repaint(self) -> None:
@@ -594,7 +594,11 @@ async def amain(argv: list[str] | None = None) -> int:
     if args.probe:
         return probe_devices()
 
-    surface = open_surface(use_device=not args.no_device, serial=args.serial)
+    surface = open_surface(
+        use_device=not args.no_device,
+        serial=args.serial,
+        theme=theme_for(args.theme),
+    )
     surface.open()
 
     # Two connections -- herdr resets a connection that both subscribes and
@@ -643,6 +647,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "what a column represents: 'workspace' (sidebar order) or 'tab' "
             "(tabs of the focused workspace). Default: workspace"
+        ),
+    )
+    parser.add_argument(
+        "--theme",
+        choices=[t.value for t in ThemeName],
+        default=ThemeName.DARK.value,
+        help=(
+            "'dark' for a dim room, 'light' for a bright one. Light is not "
+            "merely inverted: it dims toward white instead of black, so quiet "
+            "keys fade into the field rather than going muddy. Default: dark"
         ),
     )
     parser.add_argument(

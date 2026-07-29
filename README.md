@@ -29,6 +29,11 @@ Status is brightness, not colour: **idle** dim · **working** slow pulse ·
 one shared clock, so every working pane breathes in step rather than each
 starting its own phase.
 
+Two themes, for two rooms: `--theme dark` (default) and `--theme light` for a
+bright office. Light is not an inversion — it dims *toward white*, so quiet
+keys fade into the field instead of turning to grey mud, and agent accents are
+darkened to keep contrast without losing their hue.
+
 Badges show up to eight characters. A name that fits is shown whole; longer
 ticket-style names drop the project prefix, since it is identical on every pane
 in the project and so useless for telling them apart:
@@ -100,7 +105,7 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 164 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 179 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```

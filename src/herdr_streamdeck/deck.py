@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
 from .animation import LEVELS, scale_factor
+from .theme import DARK, Theme
 
 if TYPE_CHECKING:
     from PIL import Image, ImageFont
@@ -66,15 +67,21 @@ def load_icon(path: Path, size: int) -> ImageLike | None:
     return icon
 
 
-@lru_cache(maxsize=LEVELS * 2)
-def _brightness_lut(level_index: int, levels: int) -> tuple[int, ...]:
+@lru_cache(maxsize=LEVELS * 4)
+def _brightness_lut(level_index: int, levels: int, target: int = 0) -> tuple[int, ...]:
     """256-entry lookup mapping source values to a dimmed level.
 
-    A LUT keeps dimming to one C-level ``Image.point`` pass instead of any
+    Dims *toward* ``target``: black on a dark theme, white on a light one.
+    Multiplying toward black on a white field would turn a quiet key muddy
+    grey and crush its dark mark into the background.
+
+    A LUT keeps dimming to one C-level ``Image.point`` pass rather than any
     per-pixel Python.
     """
     factor = scale_factor(level_index / max(1, levels - 1))
-    return tuple(min(255, round(value * factor)) for value in range(256))
+    return tuple(
+        min(255, max(0, round(target + (value - target) * factor))) for value in range(256)
+    )
 
 
 PressHandler = Callable[[int, bool], None]
@@ -174,6 +181,9 @@ class DeckDevice(Protocol):
 class ButtonSurface(Protocol):
     """A grid of labelled, pressable keys."""
 
+    theme: Theme
+    """Colours, and which way brightness dims. See theme.Theme."""
+
     @property
     def key_count(self) -> int: ...
 
@@ -208,6 +218,7 @@ class NullSurface:
 
     key_count_: int = 15
     key_layout_: tuple[int, int] = (3, 5)
+    theme: Theme = DARK
     faces: dict[int, ButtonFace] = field(default_factory=dict)
     shown: dict[int, int] = field(default_factory=dict)
     """Key index -> last level index written. Lets tests assert animation."""
@@ -267,7 +278,14 @@ class StreamDeckSurface:
     not be running -- it takes an exclusive claim on the HID device.
     """
 
-    def __init__(self, *, serial: str | None = None, brightness: int = 60) -> None:
+    def __init__(
+        self,
+        *,
+        serial: str | None = None,
+        brightness: int = 60,
+        theme: Theme = DARK,
+    ) -> None:
+        self.theme = theme
         self._serial = serial
         self._brightness = brightness
         self._deck: DeckDevice | None = None
@@ -382,7 +400,7 @@ class StreamDeckSurface:
             if level_index == levels - 1:
                 dimmed = base
             else:
-                lut = _brightness_lut(level_index, levels)
+                lut = _brightness_lut(level_index, levels, self.theme.dim_target)
                 dimmed = base.point(list(lut) * len(base.getbands()))
             frames.append(PILHelper.to_native_key_format(deck, dimmed))
         return KeyFrames(face=face, frames=tuple(frames))
@@ -454,18 +472,23 @@ class StreamDeckSurface:
         left = right - text_width - 2 * pad_x
         top = bottom - int(height * 0.15) - 2 * pad_y
 
-        draw.rounded_rectangle((left, top, right, bottom), radius=3, fill=BADGE_FILL)
+        draw.rounded_rectangle((left, top, right, bottom), radius=3, fill=self.theme.badge_fill)
         draw.text(
             ((left + right) / 2, (top + bottom) / 2),
             label,
             font=font,
             anchor="mm",
-            fill=BADGE_TEXT,
+            fill=self.theme.badge_text,
         )
 
 
-def open_surface(*, use_device: bool = True, serial: str | None = None) -> ButtonSurface:
+def open_surface(
+    *,
+    use_device: bool = True,
+    serial: str | None = None,
+    theme: Theme = DARK,
+) -> ButtonSurface:
     """Return a real deck when asked for one, otherwise an in-memory surface."""
     if not use_device:
-        return NullSurface()
-    return StreamDeckSurface(serial=serial)
+        return NullSurface(theme=theme)
+    return StreamDeckSurface(serial=serial, theme=theme)
