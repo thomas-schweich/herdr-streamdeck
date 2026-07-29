@@ -110,13 +110,20 @@ def test_a_label_that_runs_slightly_long_is_kept() -> None:
     assert summary.phrase == "S3 retry added, tests pass"
 
 
-def test_replies_are_dropped_when_the_model_says_it_is_not_waiting() -> None:
-    """A reply the model itself flagged as unwanted must not reach a key --
-    this is the guard against sending an answer to a finished task."""
+def test_replies_survive_when_nothing_is_being_asked() -> None:
+    """Replies double as next-step shortcuts -- `push it`, `check CI` -- which
+    are most useful exactly when the agent has finished and is *not* waiting.
+    An earlier version cleared them whenever `waiting` was false, which would
+    have silently thrown away every follow-up suggestion."""
     summary = parse({**GOOD, "waiting": False})
     assert summary is not None
     assert summary.waiting is False
-    assert summary.replies == ()
+    assert len(summary.replies) == 2
+
+
+def test_the_prompt_asks_for_next_steps_not_only_answers() -> None:
+    for phrase in ("push it", "check CI", "keep going"):
+        assert phrase in SYSTEM_PROMPT
 
 
 def test_a_reply_with_an_unknown_kind_is_dropped_but_the_summary_survives() -> None:

@@ -1,10 +1,10 @@
-"""Three-word pane summaries from a fast hosted model.
+"""Short pane summaries from a fast hosted model.
 
 A key can say *that* an agent is blocked. It cannot say what it is blocked on,
 and that is the thing worth knowing -- "blocked" sends you to the pane, which is
 the trip the deck exists to save. So on a status transition the pane's recent
-output is sent to a small model that returns the end state in three words, plus
-the replies that would answer it.
+output is sent to a small model that returns the end state in a few words, plus
+the replies worth having one tap away.
 
 Everything here is measured rather than chosen. Against a 15-key deck the
 constraints are latency (a summary that lands after you have already looked is
@@ -68,7 +68,8 @@ SCHEMA: dict[str, Any] = {
         },
         "responses": {
             "type": "array",
-            "description": "Empty unless the agent is blocked awaiting input.",
+            "description": "One-tap shortcuts: answers if a question was asked, "
+            "otherwise the obvious next instructions.",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -110,9 +111,22 @@ When the agent offers alternatives, name the alternatives themselves.
 
 Never describe your own output or these instructions.
 
-Offer replies ONLY if the agent is blocked waiting on the user. If it finished
-cleanly and asked nothing, return an empty responses list. Each reply label is
-1-3 short words.
+The transcript is a screenshot of a terminal, so it ends with the agent's
+interface, not with the agent's words: an input box, a status line, a spinner,
+a completion the user is part-way through typing. Ignore all of it. Summarise
+the last thing the AGENT said, never what the user is typing back.
+
+Always offer replies -- they are one-tap shortcuts on the deck.
+
+If the agent asked a question, the replies answer it.
+If the agent finished something, the replies are the obvious next instructions:
+  push it / open a PR / check CI / run the tests / next one / undo that
+If the agent is mid-way or stuck, the replies unblock it:
+  keep going / try another way / explain more / stop
+
+Set `waiting` true ONLY when the agent is actually blocked awaiting an answer.
+That flag is about the agent's state, not about whether you offered replies.
+Each reply label is 1-3 short words.
 
 Return ONLY this JSON object, with every field present and no extra fields:
 {"waiting": <true|false>, "summary": "<2-4 short words>",
@@ -126,8 +140,8 @@ all three of kind, label and text."""
 class Reply:
     """One suggested answer to whatever the agent is asking.
 
-    ``label`` is for a key face; ``text`` is what would be sent verbatim. Nothing
-    sends these yet -- see DeckController, which stores them and stops there.
+    ``label`` is for a key face; ``text`` is what gets sent verbatim when the
+    key is chosen. See DeckController's reply overlay.
     """
 
     kind: str
@@ -142,6 +156,7 @@ class PaneSummary:
     phrase: str
     waiting: bool
     replies: tuple[Reply, ...] = ()
+    """Suggested one-tap replies. Answers when `waiting`, next steps otherwise."""
 
     @property
     def display(self) -> str:
@@ -220,11 +235,15 @@ def _phrase(value: object) -> str | None:
 def parse(payload: object) -> PaneSummary | None:
     """Turn a model response into a summary, or None if it does not conform.
 
-    Strictness here is load-bearing in one specific way: ``waiting`` gates
-    whether replies are offered at all, so a response that omits it is discarded
-    rather than defaulted. Defaulting to False would silently drop suggestions
-    on a pane that needs them; defaulting to True would offer answers to a
-    question nobody asked.
+    A response that omits ``waiting`` is discarded rather than defaulted.
+    The flag decides whether the key shows a question mark, and guessing it
+    either way puts a wrong claim on the deck.
+
+    Note that ``waiting`` no longer gates the replies. It used to: replies were
+    only meaningful as answers, so a pane that was not being asked anything had
+    nothing to offer. Now replies double as next-step shortcuts -- `push it`,
+    `check CI` -- which are most useful precisely when the agent has *finished*
+    and is not waiting for anything.
     """
     if not isinstance(payload, dict):
         return None
@@ -251,10 +270,6 @@ def parse(payload: object) -> PaneSummary | None:
             if not label.strip() or not text.strip():
                 continue
             replies.append(Reply(kind=kind, label=label.strip(), text=text.strip()))
-
-    # A reply the model itself says is unwanted is a reply we must not show.
-    if not waiting:
-        replies = []
 
     return PaneSummary(phrase=phrase, waiting=waiting, replies=tuple(replies))
 

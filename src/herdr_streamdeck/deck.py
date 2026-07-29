@@ -142,10 +142,10 @@ def field_at(background: RGB, level: float) -> RGB:
 class ButtonFace:
     """What a single key should show.
 
-    A neutral field with the agent's mark centred, an optional status strip
-    along the top edge, and the pane's name in a badge near the lower-right --
-    offset from the corner rather than flush to it, echoing how Claude Code
-    shows a session name inside its prompt box.
+    A neutral field with the agent's mark centred, a status dot in the
+    top-right, and the pane's name in a badge near the lower-right -- offset
+    from the corner rather than flush to it, echoing how Claude Code shows a
+    session name inside its prompt box.
 
     Everything here except ``background`` is drawn identically at every
     luminance level. Only the field moves.
@@ -165,14 +165,14 @@ class ButtonFace:
     summary: str = ""
     """A short phrase describing what the pane's agent just did or asked.
 
-    When present the key switches to a text-forward layout: the mark shrinks to
-    a corner and the phrase takes the middle. That is deliberate -- a summary
-    only exists on a status transition, which is exactly when the words matter
-    more than the identity, and the mark is redundant with the column you
-    already know. See summary.PaneSummary."""
+    When present the key switches to a text-forward layout: the mark fades to a
+    watermark behind the words. A summary only exists on a status transition,
+    which is exactly when what the agent said matters more than which agent it
+    is -- and the mark stays legible enough to identify it anyway. See
+    summary.PaneSummary."""
 
     status_color: RGB | None = None
-    """Thin strip along the top edge. None draws no strip."""
+    """Dot in the top-right corner. None draws no dot."""
 
     background: RGB = BACKGROUND
     """The field at full brightness. Quieter levels interpolate down from it;
@@ -320,9 +320,18 @@ class NullSurface:
         self._handler = handler
 
     def press(self, index: int, *, pressed: bool = True) -> None:
-        """Simulate a key press (test helper)."""
+        """Simulate a key going down, or up with ``pressed=False``."""
         if self._handler is not None:
             self._handler(index, pressed)
+
+    def tap(self, index: int) -> None:
+        """Down then up -- the gesture that focuses a pane.
+
+        A press on its own is a *hold* in progress, not a tap, so tests that
+        mean "the user pressed this key" have to release it too.
+        """
+        self.press(index, pressed=True)
+        self.press(index, pressed=False)
 
 
 class StreamDeckSurface:
@@ -484,13 +493,24 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace) -> ImageLike:
     from PIL import Image, ImageDraw
 
     layer: ImageLike = Image.new("RGBA", size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
+    draw: ImageDrawLike = ImageDraw.Draw(layer)
     width, height = size
 
-    # Status along the top edge, so the field itself stays neutral while agent
-    # state is still readable across the whole deck at a glance.
+    # A dot in the top-right rather than a bar across the top edge. The bar
+    # read as a border and took a full row of pixels from a 72px key; a dot
+    # carries the same colour in a corner nothing else wants.
     if face.status_color is not None:
-        draw.rectangle((0, 0, width, max(3, height // 18)), fill=face.status_color)
+        radius = max(2.0, height * 0.055)
+        inset = width * 0.16
+        draw.ellipse(
+            (
+                width - inset - radius,
+                inset - radius,
+                width - inset + radius,
+                inset + radius,
+            ),
+            fill=face.status_color,
+        )
 
     # A user-supplied icon replaces the glyph entirely; falling back to the
     # glyph when it cannot be read keeps a broken PNG from blanking a key.
@@ -508,20 +528,18 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace) -> ImageLike:
     summarised = bool(face.summary)
 
     if face.mark and not drew_icon:
+        nominal = max(MIN_MARK_SIZE, int(height * 0.36 * face.mark_scale))
+        mark_font = fit_font(draw, face.mark, nominal, width * 0.84)
         if summarised:
-            # Shrunk into the top-left, clear of the words and of the badge.
-            small = max(MIN_MARK_SIZE, int(height * 0.20 * face.mark_scale))
-            mark_font = fit_font(draw, face.mark, small, width * 0.30)
-            draw.text(
-                (width * 0.06, height * 0.13),
-                face.mark,
-                font=mark_font,
-                anchor="lt",
-                fill=face.mark_color,
+            # Full size, faded, behind the words. Shrinking it into a corner
+            # was the first attempt and it wasted the middle of the key on a
+            # glyph you had already read from the column it sits in. As a
+            # watermark it keeps identifying the agent without competing.
+            layer = Image.alpha_composite(
+                layer, _watermark(size, face.mark, mark_font, face.mark_color, height)
             )
+            draw = ImageDraw.Draw(layer)
         else:
-            nominal = max(MIN_MARK_SIZE, int(height * 0.36 * face.mark_scale))
-            mark_font = fit_font(draw, face.mark, nominal, width * 0.84)
             draw.text(
                 (width / 2, height / 2 - height * 0.06),
                 face.mark,
@@ -532,10 +550,46 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace) -> ImageLike:
 
     if summarised:
         _draw_summary(draw, face.summary, width, height)
-    elif face.badge:
+    # The nameplate stays up alongside a summary. Fading the mark to a
+    # watermark freed the middle of the key, and knowing *which* pane is asking
+    # matters as much as what it asked.
+    if face.badge:
         _draw_badge(draw, face.badge, width, height)
 
     return layer
+
+
+WATERMARK_ALPHA = 64
+"""Opacity of the mark behind a summary, out of 255.
+
+Low enough that near-white text reads cleanly over the densest part of a glyph,
+high enough that the agent is still identifiable at arm's length.
+"""
+
+
+def _watermark(
+    size: tuple[int, int], mark: str, font: ImageFontLike, color: RGB, height: int
+) -> ImageLike:
+    """The mark, full size, faded, on its own transparent layer.
+
+    Drawn separately and then faded wholesale rather than drawn with an alpha
+    fill: PIL composites a glyph mask against the fill colour, so passing alpha
+    directly interacts with antialiasing and leaves the edges the wrong weight.
+    Scaling the finished alpha channel keeps the glyph's shape exactly.
+    """
+    from PIL import Image, ImageDraw
+
+    glyph: ImageLike = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(glyph).text(
+        (size[0] / 2, height / 2 - height * 0.06),
+        mark,
+        font=font,
+        anchor="mm",
+        fill=color,
+    )
+    faded = glyph.getchannel("A").point(lambda value: value * WATERMARK_ALPHA // 255)
+    glyph.putalpha(faded)
+    return glyph
 
 
 SUMMARY_COLOR: RGB = (232, 232, 238)
@@ -585,8 +639,10 @@ def _draw_summary(draw: ImageDrawLike, text: str, width: int, height: int) -> No
     form gave `remove endpoint deprecation?`, which parses as a question about
     un-deprecating something.
     """
-    top = height * 0.30
-    available = height * 0.94 - top
+    # Bounded above by the status dot and below by the nameplate, both of
+    # which stay visible.
+    top = height * 0.22
+    available = height * 0.76 - top
     budget = width * 0.92
 
     for size in range(SUMMARY_CAP, MIN_MARK_SIZE - 1, -1):

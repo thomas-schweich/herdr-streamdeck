@@ -55,7 +55,16 @@ rather than just a red bar. The mark shrinks to the corner to make room, since
 at that moment what it's doing matters more than which agent it is.
 
 The question mark is appended from a `waiting` flag rather than asked for, so no
-word is spent restating that a question was asked.
+word is spent restating that a question was asked. The agent's mark fades to a
+watermark behind the words, keeping the nameplate and status dot in view.
+
+**Hold a key** for 0.45s and its suggested replies appear in the column furthest
+from your hand. Let go — they stay up for five seconds, so the same finger can
+tap one. Choosing sends it to the agent via `agent.prompt`; any other key, or
+five seconds of nothing, dismisses.
+
+Replies are answers when the agent asked something, and next steps when it did
+not — `push it`, `open PR`, `check CI`.
 
 Set `FIREWORKS_API_KEY` (environment or `.env`) to enable it; without a key the
 deck runs exactly as before. `--no-summaries` turns it off explicitly. Every
@@ -142,14 +151,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 235 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 252 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 229 run anywhere, and pin the protocol quirks documented
+XDG default); the other 246 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

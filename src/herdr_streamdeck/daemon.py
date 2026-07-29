@@ -33,7 +33,7 @@ import contextlib
 import logging
 import signal
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -43,7 +43,7 @@ from .deck import EMPTY_BACKGROUND, RGB, ButtonFace, ButtonSurface, KeyFrames, o
 from .icons import mark_for, resolve_override
 from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
 from .protocol import Event, HerdrError, JSONObject, subscription
-from .summary import PaneSummary, Summariser
+from .summary import PaneSummary, Reply, Summariser
 from .summary import build as build_summariser
 
 logger = logging.getLogger("herdr_streamdeck")
@@ -60,7 +60,7 @@ SUBSCRIPTIONS = (
     "tab.focused",
 )
 
-# Drawn as a strip along the top edge, so the key field itself stays neutral.
+# Drawn as a dot in the top-right, so the key field itself stays neutral.
 STATUS_COLORS: dict[str, RGB] = {
     "working": (217, 132, 24),  # amber -- busy
     "blocked": (204, 44, 44),  # red   -- needs input
@@ -87,6 +87,27 @@ def worth_summarising(before: str, after: str) -> bool:
         return False
     return before == "working" or after == "blocked"
 
+
+HOLD_SECONDS = 0.45
+"""How long a key must be held before its reply options appear.
+
+Long enough that a normal press-to-focus never trips it, short enough that the
+options feel like part of the same gesture rather than a separate mode."""
+
+OVERLAY_SECONDS = 5.0
+"""How long the options stay up after the held key is released.
+
+They outlive the hold because choosing one while still holding means two keys
+down at once, and a Stream Deck is light enough to slide across a desk when you
+do that. Hold, let go, then tap."""
+
+REPLY_BACKGROUND: RGB = (30, 34, 44)
+REPLY_COLORS: dict[str, RGB] = {
+    "affirmative": (34, 168, 82),
+    "negative": (204, 44, 44),
+    "proceed": (217, 132, 24),
+    "alternative": (96, 200, 240),
+}
 
 ANIMATION_FPS = 20
 """Frame rate for pulsing and blinking.
@@ -115,6 +136,35 @@ STRUCTURAL_EVENTS = frozenset(
         "layout.updated",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyOverlay:
+    """The keys that mean something else while a key is held down."""
+
+    held: int
+    pane_id: str
+    keys: dict[int, Reply]
+
+
+def reply_column(held_index: int, columns: int) -> int:
+    """Which column the reply options occupy.
+
+    The far side from the held key. One hand is on the deck holding a key and
+    covering the keys around it, so the options go where that hand is not.
+    """
+    if columns <= 1:
+        return 0
+    return 0 if (held_index % columns) >= columns / 2 else columns - 1
+
+
+def reply_face(reply: Reply) -> ButtonFace:
+    """A key offering one suggested reply."""
+    return ButtonFace(
+        summary=reply.label,
+        status_color=REPLY_COLORS.get(reply.kind),
+        background=REPLY_BACKGROUND,
+    )
 
 
 class HerdrLike(Protocol):
@@ -170,6 +220,12 @@ class DeckController:
         # One clock for the whole deck: phase must not depend on when a pane
         # started working, or keys pulse out of step with each other.
         self._epoch = 0.0
+        # Reply overlay: which key is being held, and what the other keys mean
+        # while it is. None whenever no key is held long enough.
+        self._overlay: ReplyOverlay | None = None
+        self._holding: int | None = None
+        self._hold_task: asyncio.Task[None] | None = None
+        self._overlay_task: asyncio.Task[None] | None = None
 
     @property
     def grid(self) -> Grid:
@@ -190,6 +246,9 @@ class DeckController:
 
     def _remove(self, pane_id: str) -> bool:
         self._summaries.pop(pane_id, None)
+        overlay = self._overlay
+        if overlay is not None and overlay.pane_id == pane_id:
+            self._overlay = None
         return self._panes.pop(pane_id, None) is not None
 
     def _rebuild_columns(self) -> None:
@@ -231,10 +290,17 @@ class DeckController:
         self._rebuild_columns()
         grid = self.grid
 
+        overlay = self._overlay
         for index in range(self._surface.key_count):
-            pane = grid.pane_at(self._columns, index)
-            face = self.face_for(pane)
-            animation = animation_for(pane.status) if pane else EMPTY_ANIMATION
+            if overlay is not None and index in overlay.keys:
+                face = reply_face(overlay.keys[index])
+                # Steady and full: an option you are choosing between must not
+                # pulse under your finger.
+                animation = EMPTY_ANIMATION
+            else:
+                pane = grid.pane_at(self._columns, index)
+                face = self.face_for(pane)
+                animation = animation_for(pane.status) if pane else EMPTY_ANIMATION
             self._animations[index] = animation
 
             cached = self._frames.get(index)
@@ -327,22 +393,15 @@ class DeckController:
         )
         self._dirty.set()
 
-    def replies_for(self, pane_id: str) -> tuple[object, ...]:
-        """Suggested replies for a pane, if any were offered.
-
-        Exposed but unused: nothing sends these yet. Committing text to a live
-        agent session on a single keypress needs an interaction that cannot be
-        mistapped, and that has not been designed.
-        """
+    def replies_for(self, pane_id: str) -> tuple[Reply, ...]:
+        """Suggested replies for a pane, if any were offered."""
         summary = self._summaries.get(pane_id)
-        return tuple(summary.replies) if summary else ()
+        return summary.replies if summary else ()
 
     # ------------------------------------------------------------------ presses
 
     def _on_press(self, index: int, pressed: bool) -> None:
         """Invoked on the deck's reader thread -- hop to the event loop."""
-        if not pressed:
-            return
         loop = self._loop
         if loop is None:
             # Only reachable if a press arrives before run() starts. Logged
@@ -350,19 +409,109 @@ class DeckController:
             # indistinguishable from the handler never being installed.
             logger.warning("key %d pressed before the controller was running", index)
             return
-        logger.debug("key %d pressed", index)
-        loop.call_soon_threadsafe(self._dispatch_press, index)
+        logger.debug("key %d %s", index, "down" if pressed else "up")
+        loop.call_soon_threadsafe(self._key_down if pressed else self._key_up, index)
 
-    def _dispatch_press(self, index: int) -> None:
+    def _key_down(self, index: int) -> None:
+        overlay = self._overlay
+        if overlay is not None:
+            if index in overlay.keys:
+                self._send_reply(overlay.pane_id, overlay.keys[index])
+                self._dismiss_overlay()
+                return
+            # Any other key cancels the offer and behaves normally.
+            self._dismiss_overlay()
+
         pane = self.grid.pane_at(self._columns, index)
         if pane is None:
             logger.debug("key %d pressed but maps to no pane", index)
             return
-        pane_id = pane.pane_id
-        logger.info("key %d pressed -> focusing %s", index, pane_id)
-        task = asyncio.create_task(self._focus(pane_id), name=f"focus-{pane_id}")
-        # Hold a reference so the task is not garbage collected mid-flight.
+        self._holding = index
+        self._hold_task = asyncio.create_task(
+            self._hold(index, pane.pane_id), name=f"hold-{index}"
+        )
+
+    def _key_up(self, index: int) -> None:
+        overlay = self._overlay
+        if overlay is not None and index == overlay.held:
+            # Let go of the held key and the options stay up, briefly, so the
+            # same finger can choose one. Holding both at once slides the deck.
+            self._holding = None
+            self._overlay_task = asyncio.create_task(
+                self._expire_overlay(), name="overlay-expiry"
+            )
+            return
+        if self._holding != index:
+            return
+        self._holding = None
+        if self._hold_task is not None:
+            self._hold_task.cancel()
+            self._hold_task = None
+        # A tap, not a hold. Focus happens on release so the two gestures stay
+        # distinguishable -- focusing on press would fire before a hold could
+        # be recognised, and every hold would drag you into the pane.
+        pane = self.grid.pane_at(self._columns, index)
+        if pane is None:
+            return
+        logger.info("key %d tapped -> focusing %s", index, pane.pane_id)
+        task = asyncio.create_task(self._focus(pane.pane_id), name=f"focus-{pane.pane_id}")
         task.add_done_callback(lambda _: None)
+
+    async def _hold(self, index: int, pane_id: str) -> None:
+        """Open the reply overlay if the key stays down long enough."""
+        await asyncio.sleep(HOLD_SECONDS)
+        if self._holding != index:
+            return
+        replies = self.replies_for(pane_id)
+        if not replies:
+            logger.debug("held key %d but %s has no replies to offer", index, pane_id)
+            return
+        grid = self.grid
+        column = reply_column(index, grid.columns)
+        keys = {
+            row * grid.columns + column: reply for row, reply in enumerate(replies[: grid.rows])
+        }
+        self._overlay = ReplyOverlay(held=index, pane_id=pane_id, keys=keys)
+        logger.info(
+            "key %d held -> %d replies for %s in column %d",
+            index,
+            len(keys),
+            pane_id,
+            column,
+        )
+        self.repaint()
+
+    async def _expire_overlay(self) -> None:
+        """Take the options away again if nothing is chosen."""
+        await asyncio.sleep(OVERLAY_SECONDS)
+        if self._overlay is not None:
+            logger.debug("reply options expired unchosen")
+            self._dismiss_overlay()
+
+    def _dismiss_overlay(self) -> None:
+        if self._overlay is None:
+            return
+        self._overlay = None
+        self._holding = None
+        for task in (self._hold_task, self._overlay_task):
+            if task is not None:
+                task.cancel()
+        self._hold_task = None
+        self._overlay_task = None
+        self.repaint()
+
+    def _send_reply(self, pane_id: str, reply: Reply) -> None:
+        logger.info("sending %r to %s: %s", reply.label, pane_id, reply.text)
+        task = asyncio.create_task(self._prompt(pane_id, reply.text), name=f"reply-{pane_id}")
+        task.add_done_callback(lambda _: None)
+
+    async def _prompt(self, pane_id: str, text: str) -> None:
+        try:
+            await self._client.request("agent.prompt", {"target": pane_id, "text": text})
+        except HerdrError as exc:
+            logger.warning("could not send a reply to %s: %s", pane_id, exc)
+        except Exception:
+            logger.warning("could not send a reply to %s", pane_id, exc_info=True)
 
     async def _focus(self, pane_id: str) -> None:
         try:
@@ -516,6 +665,10 @@ class DeckController:
                     # The old summary described the previous state, so it is now
                     # actively misleading -- drop it before anything repaints.
                     self._summaries.pop(pane_id, None)
+                    overlay = self._overlay
+                    if overlay is not None and overlay.pane_id == pane_id:
+                        # Those options answered the previous state.
+                        self._overlay = None
                     if worth_summarising(existing.status, status):
                         self._request_summary(pane_id)
                     self._dirty.set()
