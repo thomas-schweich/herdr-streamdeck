@@ -58,11 +58,16 @@ MARKS: dict[str, AgentMark] = {
     # "pi prime" -- U+2032 PRIME, not an ASCII apostrophe, which sits too low
     # and reads as a typo at this size.
     "omp": AgentMark("π′", (196, 160, 255), 1.35),
-    # Echoes the `>_` inside Codex's own cloud logo. A bare letter sat badly
-    # next to Claude's starburst -- one key read as a logo and the other as a
-    # placeholder. Sky blue, not the brand's black-on-white, which has no
+    # The chevron from Codex's own cloud logo, alone. `>_` spelled out as two
+    # characters was half again as wide as every single-glyph mark, and could
+    # not be fixed by scaling: matching Claude on width left it 14px tall with
+    # 59 ink pixels against Claude's 117, so it read as smaller, not equal. In
+    # a monospace face `_` is a full-em bar, so the underscore *is* the width
+    # and no amount of tracking recovers it. U+276F is one glyph, so it sizes
+    # like the others -- 1.2 puts its ink at 13x24/119px beside Claude's
+    # 22x23/117. Sky blue, not the brand's black-on-white, which has no
     # contrast to give on either theme.
-    "codex": AgentMark(">_", (96, 200, 240), 1.05),
+    "codex": AgentMark("❯", (96, 200, 240), 1.2),
     # Spelled out rather than lettered: `C` reads as Codex to anyone who has
     # seen the two side by side, and `Co` collides with Cursor's `Cu`.
     "copilot": AgentMark("copilot", (139, 148, 158), 0.62),
@@ -84,10 +89,10 @@ TERMINAL = AgentMark("$_", (150, 152, 160), 1.05)
 Not an absence to be greyed out -- switching to a terminal is a normal thing
 to want from the deck, so it gets a real mark and stays legible.
 
-``$_`` because ``>_`` belongs to Codex, whose logo is a cloud containing it.
-The two are the only prompt-shaped marks, so they lean on the sigil and on
-colour to stay apart: a grey ``$`` against a sky-blue ``>``. Nothing else may
-take an ``X_`` form without breaking that.
+``$_`` rather than ``>_``: the chevron reads as Codex, whose logo is a cloud
+containing one. A shell is a ``$`` prompt anyway, so this is the truer mark of
+the two -- and being two characters costs nothing here, since a terminal has no
+single-glyph mark to sit beside.
 
 Replaces an earlier middle dot, which at 41px rendered as a small featureless
 square -- present in the font, but meaningless on the key."""

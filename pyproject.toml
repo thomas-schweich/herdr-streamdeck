@@ -62,6 +62,11 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
-# U+2032 PRIME is deliberate: it is the "prime" in omp's pi-prime mark, and
-# reads correctly where an ASCII apostrophe sits too low and looks like a typo.
-allowed-confusables = ["′"]
+# Both of these are marks drawn on a key, where the glyph *is* the point, so
+# the ASCII lookalike ruff suggests would be a downgrade rather than a fix.
+#   U+2032 PRIME    the "prime" in omp's pi-prime mark; an ASCII apostrophe
+#                   sits too low and reads as a typo.
+#   U+276F CHEVRON  Codex's mark. Heavier and taller than ASCII `>`, which
+#                   measures 13x24 against Claude's 22x23 -- a plain `>` reads
+#                   as punctuation next to it rather than as a logo.
+allowed-confusables = ["′", "❯"]

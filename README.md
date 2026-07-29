@@ -17,7 +17,7 @@ so the deck always matches what the sidebar shows.
   diggy      codex      diggy    herdr-sd
 ┌─────────┬─────────┬─────────┬─────────┬─────────┐
 │  ▔▔▔▔▔  │  ▔▔▔▔▔  │  ▔▔▔▔▔  │  ▔▔▔▔▔  │         │  ← status strip
-│    ✳    │   >_    │    ✳    │    ✳    │         │  ← agent mark
+│    ✳    │    ❯    │    ✳    │    ✳    │         │  ← agent mark
 │    ⌐review│       │         │   ⌐api  │         │  ← name badge
 ├─────────┼─────────┼─────────┼─────────┼─────────┤
 │    ✳    │         │         │    π′   │         │
@@ -56,8 +56,11 @@ in the project and so useless for telling them apart:
 
 Panes with no detected agent are plain terminals, marked `$_` and fully
 switchable — pressing the key focuses the shell like any other pane. Codex
-takes the sky-blue `>_` from inside its own cloud logo; the two prompt-shaped
-marks are told apart by sigil and colour, so nothing else may take that form.
+takes the sky-blue `❯` from inside its own cloud logo — the chevron alone,
+because `>_` spelled out was half again as wide as every other mark and could
+not be scaled down without shrinking: matching it to Claude on *width* left it
+14px tall against Claude's 23. Marks are sized so their ink heights agree,
+which is what the eye reads as "the same size".
 
 Agent marks are typographic by default. Drop a PNG named after the agent into
 `$HERDR_PLUGIN_CONFIG_DIR/icons/` (e.g. `claude.png`) to use your own artwork
@@ -125,14 +128,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 216 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 217 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 210 run anywhere, and pin the protocol quirks documented
+XDG default); the other 211 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

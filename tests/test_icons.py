@@ -18,28 +18,27 @@ def test_requested_marks() -> None:
     assert mark_for("omp").glyph == "π′"  # pi prime
     assert mark_for("pi").glyph == "π"
     assert mark_for("opencode").glyph == "OC"
-    assert mark_for("codex").glyph == ">_"
+    assert mark_for("codex").glyph == "❯"
     assert mark_for("copilot").glyph == "copilot"
     assert mark_for("claude").glyph == "✳"
 
 
 def test_codex_and_the_terminal_stay_apart() -> None:
-    """The only two prompt-shaped marks. They share a trailing underscore, so
-    the sigil and the colour are all that separate them -- and both must."""
+    """Both are prompt marks, so they must differ in shape and in colour."""
     codex = mark_for("codex")
-    assert codex.glyph == ">_"
+    assert codex.glyph == "❯"
     assert TERMINAL.glyph == "$_"
-    assert codex.glyph[0] != TERMINAL.glyph[0]
-    assert codex.color != TERMINAL.color
 
     difference = sum(abs(a - b) for a, b in zip(codex.color, TERMINAL.color, strict=True))
     assert difference > 120, "too close in colour to tell apart at a glance"
 
 
-def test_no_other_mark_takes_a_prompt_shape() -> None:
-    """A third `X_` mark would break the pairing above."""
-    prompts = {name for name, mark in MARKS.items() if mark.glyph.endswith("_")}
-    assert prompts == {"codex"}
+def test_the_terminal_is_the_only_multi_character_mark_besides_copilot() -> None:
+    """Width is what a multi-character mark costs. Codex used to be `>_` and
+    was half again as wide as every other agent mark; anything reaching two
+    characters again should be a deliberate choice, not a drift."""
+    wide = {name for name, mark in MARKS.items() if len(mark.glyph) > 1}
+    assert wide == {"omp", "opencode", "cursor", "droid", "kilo", "qwencode", "copilot"}
 
 
 def test_no_two_agents_share_a_mark() -> None:

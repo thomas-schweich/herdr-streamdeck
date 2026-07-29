@@ -222,3 +222,40 @@ def test_the_mark_stays_within_the_key_bounds() -> None:
     alpha = compose_foreground(SIZE, face, DARK).getchannel("A").tobytes()
     for y in range(HEIGHT):
         assert alpha[y * WIDTH] == 0 and alpha[y * WIDTH + WIDTH - 1] == 0
+
+
+def test_single_glyph_marks_all_look_the_same_size() -> None:
+    """Optical size is ink height, not font size and not advance width.
+
+    Codex was `>_`, two characters and half again as wide as anything else.
+    Scaling it to match on width made it 14px tall against Claude's 23 -- it
+    matched the dimension being measured and lost the one being seen. This
+    measures what the eye actually reads.
+
+    Height rather than ink mass: a solid letter carries twice the ink of
+    Claude's thin-spoked asterisk at the same apparent size, so mass compares
+    stroke weight between glyph classes, not size.
+    """
+    from PIL import Image, ImageDraw
+
+    from herdr_streamdeck.deck import MIN_MARK_SIZE, load_font
+    from herdr_streamdeck.icons import MARKS
+
+    def ink_height(glyph: str, size: int) -> int:
+        canvas = Image.new("L", (WIDTH * 2, HEIGHT * 2), 0)
+        ImageDraw.Draw(canvas).text(
+            (WIDTH, HEIGHT), glyph, font=load_font(size), anchor="mm", fill=255
+        )
+        box = canvas.getbbox()
+        assert box is not None, f"{glyph!r} drew nothing"
+        return box[3] - box[1]
+
+    def height_of(glyph: str, scale: float) -> int:
+        return ink_height(glyph, max(MIN_MARK_SIZE, int(HEIGHT * 0.36 * scale)))
+
+    reference = height_of(MARKS["claude"].glyph, MARKS["claude"].scale)
+    for name, mark in MARKS.items():
+        if len(mark.glyph) > 1:
+            continue  # a word or a pair is a different problem; see below
+        ratio = height_of(mark.glyph, mark.scale) / reference
+        assert 0.85 <= ratio <= 1.40, f"{name} reads at {ratio:.2f}x Claude's size"
