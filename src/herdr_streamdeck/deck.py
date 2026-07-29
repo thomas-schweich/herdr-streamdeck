@@ -161,6 +161,16 @@ class ButtonFace:
     """User-supplied image replacing the glyph. See icons.resolve_override."""
 
     badge: str = ""
+
+    summary: tuple[str, ...] = ()
+    """Three words describing what the pane's agent just did or asked.
+
+    When present the key switches to a text-forward layout: the mark shrinks to
+    a corner and the words take the middle. That is deliberate -- a summary only
+    exists on a status transition, which is exactly when the words matter more
+    than the identity, and the mark is redundant with the column you already
+    know. See summary.PaneSummary."""
+
     status_color: RGB | None = None
     """Thin strip along the top edge. None draws no strip."""
 
@@ -495,21 +505,68 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace) -> ImageLike:
             layer.paste(icon, origin, icon)
             drew_icon = True
 
-    if face.mark and not drew_icon:
-        nominal = max(MIN_MARK_SIZE, int(height * 0.36 * face.mark_scale))
-        mark_font = fit_font(draw, face.mark, nominal, width * 0.84)
-        draw.text(
-            (width / 2, height / 2 - height * 0.06),
-            face.mark,
-            font=mark_font,
-            anchor="mm",
-            fill=face.mark_color,
-        )
+    summarised = bool(face.summary)
 
-    if face.badge:
+    if face.mark and not drew_icon:
+        if summarised:
+            # Shrunk into the top-left, clear of the words and of the badge.
+            small = max(MIN_MARK_SIZE, int(height * 0.20 * face.mark_scale))
+            mark_font = fit_font(draw, face.mark, small, width * 0.30)
+            draw.text(
+                (width * 0.06, height * 0.13),
+                face.mark,
+                font=mark_font,
+                anchor="lt",
+                fill=face.mark_color,
+            )
+        else:
+            nominal = max(MIN_MARK_SIZE, int(height * 0.36 * face.mark_scale))
+            mark_font = fit_font(draw, face.mark, nominal, width * 0.84)
+            draw.text(
+                (width / 2, height / 2 - height * 0.06),
+                face.mark,
+                font=mark_font,
+                anchor="mm",
+                fill=face.mark_color,
+            )
+
+    if summarised:
+        _draw_summary(draw, face.summary, width, height)
+    elif face.badge:
         _draw_badge(draw, face.badge, width, height)
 
     return layer
+
+
+SUMMARY_COLOR: RGB = (232, 232, 238)
+
+
+def _draw_summary(draw: ImageDrawLike, words: tuple[str, ...], width: int, height: int) -> None:
+    """Three words, one per line, filling the middle of the key.
+
+    Each line is sized independently to the widest it can be and still fit, so a
+    short word reads large and a long one stays inside the key rather than being
+    clipped. Uniform sizing would have to assume the longest word, wasting the
+    other two lines.
+    """
+    lines = [word for word in words if word][:3]
+    if not lines:
+        return
+
+    top = height * 0.30
+    slot = (height * 0.94 - top) / len(lines)
+    budget = width * 0.90
+    cap = max(MIN_MARK_SIZE, int(slot * 0.86))
+
+    for index, word in enumerate(lines):
+        font = fit_font(draw, word, cap, budget)
+        draw.text(
+            (width / 2, top + slot * (index + 0.5)),
+            word,
+            font=font,
+            anchor="mm",
+            fill=SUMMARY_COLOR,
+        )
 
 
 def _draw_badge(draw: ImageDrawLike, text: str, width: int, height: int) -> None:

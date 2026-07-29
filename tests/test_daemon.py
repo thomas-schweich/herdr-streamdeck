@@ -18,6 +18,7 @@ from herdr_streamdeck.daemon import (
 from herdr_streamdeck.deck import ButtonFace, NullSurface, PressHandler
 from herdr_streamdeck.icons import mark_for
 from herdr_streamdeck.protocol import Event, HerdrError, JSONObject
+from herdr_streamdeck.summary import PaneSummary, Reply, Summariser
 
 
 def pane_record(pane_id: str, workspace: str = "w1", **overrides: Any) -> JSONObject:
@@ -48,6 +49,7 @@ class StubClient:
         self.requests: list[tuple[str, JSONObject | None]] = []
         self.subscriptions: list[JSONObject] = []
         self.resubscribes = 0
+        self.pane_text = "agent output"
 
     async def request(self, method: str, params: JSONObject | None = None) -> JSONObject:
         self.requests.append((method, params))
@@ -60,6 +62,8 @@ class StubClient:
             }
         if method == "tab.list":
             return {"tabs": []}
+        if method == "pane.read":
+            return {"read": {"text": self.pane_text}}
         return {}
 
     async def snapshot(self) -> JSONObject:
@@ -593,3 +597,136 @@ async def test_run_installs_the_press_handler() -> None:
 
     assert surface.installs, "run() must install a press handler"
     assert surface.installs[0] == controller._on_press
+
+
+# -------------------------------------------------------------------- summaries
+
+
+def status_changed(pane_id: str, status: str) -> Event:
+    return Event(
+        kind="pane.agent_status_changed",
+        raw_kind="pane.agent_status_changed",
+        data={"pane_id": pane_id, "agent_status": status},
+    )
+
+
+def summariser_returning(summary: PaneSummary | None, calls: list[str]) -> Summariser:
+    def send(body: bytes, timeout: float) -> bytes:
+        raise AssertionError("transport should not be reached")
+
+    class Fixed(Summariser):
+        async def summarise(self, transcript: str) -> PaneSummary | None:
+            calls.append(transcript)
+            return summary
+
+    return Fixed(transport=send)
+
+
+SUMMARY = PaneSummary(
+    words=("asking", "endpoint", "removal"),
+    waiting=True,
+    replies=(Reply("affirmative", "Remove", "Remove it."),),
+)
+
+
+async def test_blocking_asks_for_a_summary_and_shows_it() -> None:
+    calls: list[str] = []
+    controller, surface, client = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._summariser = summariser_returning(SUMMARY, calls)
+    await controller.prime()
+
+    controller.handle(status_changed("w1:p1", "blocked"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    controller.repaint()
+
+    assert calls == ["agent output"], "the pane's own output should be summarised"
+    assert surface.faces[0].summary == ("asking", "endpoint", "removal")
+    assert [r[0] for r in client.requests].count("pane.read") == 1
+
+
+async def test_a_working_pane_is_not_summarised() -> None:
+    """Summaries cost money and a working pane changes constantly."""
+    calls: list[str] = []
+    controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._summariser = summariser_returning(SUMMARY, calls)
+    await controller.prime()
+
+    controller.handle(status_changed("w1:p1", "working"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert calls == []
+
+
+async def test_a_new_status_drops_the_old_summary_immediately() -> None:
+    """The words described the previous state, so leaving them up is worse than
+    showing nothing -- the key would assert something no longer true."""
+    calls: list[str] = []
+    controller, surface, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._summariser = summariser_returning(SUMMARY, calls)
+    await controller.prime()
+
+    controller.handle(status_changed("w1:p1", "blocked"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    controller.repaint()
+    assert surface.faces[0].summary
+
+    controller.handle(status_changed("w1:p1", "working"))
+    controller.repaint()
+    assert surface.faces[0].summary == ()
+
+
+async def test_a_failing_summariser_leaves_the_deck_working() -> None:
+    calls: list[str] = []
+    controller, surface, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._summariser = summariser_returning(None, calls)
+    await controller.prime()
+
+    controller.handle(status_changed("w1:p1", "blocked"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    controller.repaint()
+
+    assert surface.faces[0].summary == ()
+    assert surface.faces[0].mark == mark_for("claude").glyph, "the key still renders"
+
+
+async def test_no_summariser_is_a_supported_state() -> None:
+    controller, surface, client = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    await controller.prime()
+    controller.handle(status_changed("w1:p1", "blocked"))
+    await asyncio.sleep(0)
+    controller.repaint()
+
+    assert surface.faces[0].summary == ()
+    assert "pane.read" not in [r[0] for r in client.requests]
+
+
+async def test_a_summary_for_a_pane_that_has_gone_is_discarded() -> None:
+    """The read and the model call take time; the pane can close meanwhile."""
+    calls: list[str] = []
+    controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._summariser = summariser_returning(SUMMARY, calls)
+    await controller.prime()
+
+    controller.handle(status_changed("w1:p1", "blocked"))
+    controller._remove("w1:p1")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert controller._summaries == {}
+
+
+async def test_replies_are_kept_but_nothing_sends_them() -> None:
+    """They are stored for an interaction that has not been designed yet."""
+    calls: list[str] = []
+    controller, _, client = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._summariser = summariser_returning(SUMMARY, calls)
+    await controller.prime()
+
+    controller.handle(status_changed("w1:p1", "blocked"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert len(controller.replies_for("w1:p1")) == 1
+    assert not any(m.startswith("agent.") or m == "pane.send_text" for m, _ in client.requests)

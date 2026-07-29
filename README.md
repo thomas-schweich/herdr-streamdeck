@@ -49,6 +49,22 @@ in the project and so useless for telling them apart:
 | `ENG-4521-refactor` | `refactor` | a description beats a number |
 | `reviewer` | `reviewer` | not a ticket, and it fits |
 
+When an agent blocks or finishes, the pane's recent output is summarised in
+three words by a small hosted model and shown on the key — `asking / endpoint /
+removal` rather than just a red bar. The mark shrinks to the corner to make room,
+since at that moment what it's doing matters more than which agent it is.
+
+Set `FIREWORKS_API_KEY` (environment or `.env`) to enable it; without a key the
+deck runs exactly as before. `--no-summaries` turns it off explicitly. Every
+failure — timeout, rate limit, malformed response — degrades to no summary
+rather than a wrong one, and nothing blocks the display on the network.
+
+The model and its settings were chosen by measurement, not preference; see the
+module docstring in `summary.py` for the bake-off. Suggested replies come back
+with each summary and are stored, but nothing sends them yet — committing text
+to a live agent session on a keypress needs an interaction that can't be
+mistapped.
+
 Panes with no detected agent are plain terminals, marked `$_` and fully
 switchable — pressing the key focuses the shell like any other pane. Codex
 takes the sky-blue `❯` from inside its own cloud logo — the chevron alone,
@@ -123,14 +139,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 173 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 216 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 167 run anywhere, and pin the protocol quirks documented
+XDG default); the other 210 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

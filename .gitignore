@@ -11,3 +11,5 @@ wheels/
 
 # Transcript written by the elevated Windows setup script.
 .windows-setup.log
+
+.env

@@ -43,6 +43,8 @@ from .deck import EMPTY_BACKGROUND, RGB, ButtonFace, ButtonSurface, KeyFrames, o
 from .icons import mark_for, resolve_override
 from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
 from .protocol import Event, HerdrError, JSONObject, subscription
+from .summary import PaneSummary, Summariser
+from .summary import build as build_summariser
 
 logger = logging.getLogger("herdr_streamdeck")
 
@@ -65,6 +67,14 @@ STATUS_COLORS: dict[str, RGB] = {
     "done": (34, 168, 82),  # green -- finished, unseen
     "idle": (82, 82, 91),  # grey  -- waiting, seen
 }
+
+SUMMARISE_ON = frozenset({"blocked", "done"})
+"""Statuses worth paying a model to explain.
+
+Only transitions *into* these, and only these two: `blocked` is the state the
+deck cannot resolve on its own, and `done` is the one you act on. Summarising
+`working` would fire continuously for no gain, and `idle` says all there is to
+say already."""
 
 ANIMATION_FPS = 20
 """Frame rate for pulsing and blinking.
@@ -123,10 +133,14 @@ class DeckController:
         *,
         mode: GroupingMode = GroupingMode.WORKSPACE,
         reconcile_interval: float = 60.0,
+        summariser: Summariser | None = None,
     ) -> None:
         self._client = client
         self._surface = surface
         self._mode = mode
+        self._summariser = summariser
+        self._summaries: dict[str, PaneSummary] = {}
+        self._summarising: set[str] = set()
         self._reconcile_interval = reconcile_interval
         # Insertion order matters: it is herdr's pane order, and sorting it
         # would replace herdr's arrangement with ours.
@@ -163,6 +177,7 @@ class DeckController:
         return True
 
     def _remove(self, pane_id: str) -> bool:
+        self._summaries.pop(pane_id, None)
         return self._panes.pop(pane_id, None) is not None
 
     def _rebuild_columns(self) -> None:
@@ -181,6 +196,7 @@ class DeckController:
         """The face for one key."""
         if pane is None:
             return ButtonFace(background=EMPTY_BACKGROUND)
+        summary = self._summaries.get(pane.pane_id)
         mark = mark_for(pane.mark_key)
         return ButtonFace(
             mark=mark.glyph,
@@ -189,6 +205,7 @@ class DeckController:
             # A user PNG in the plugin config dir replaces the glyph.
             icon=resolve_override(pane.mark_key),
             badge=pane.badge,
+            summary=summary.words if summary else (),
             status_color=STATUS_COLORS.get(pane.status),
         )
 
@@ -247,6 +264,66 @@ class DeckController:
             self._shown[index] = level
             writes += 1
         return writes
+
+    # ---------------------------------------------------------------- summaries
+
+    def _request_summary(self, pane_id: str) -> None:
+        """Kick off a summary without blocking the caller.
+
+        Fire-and-forget on purpose: the key repaints immediately with its status
+        animation, and the words arrive a beat later if they arrive at all. The
+        deck never waits on the network to draw.
+        """
+        if self._summariser is None or pane_id in self._summarising:
+            return
+        self._summarising.add(pane_id)
+        task = asyncio.create_task(self._summarise(pane_id), name=f"summary-{pane_id}")
+        task.add_done_callback(lambda _: self._summarising.discard(pane_id))
+
+    async def _summarise(self, pane_id: str) -> None:
+        summariser = self._summariser
+        if summariser is None:
+            return
+        try:
+            response = await self._client.request(
+                "pane.read", {"pane_id": pane_id, "source": "recent", "lines": 60}
+            )
+        except HerdrError as exc:
+            logger.debug("could not read %s for a summary: %s", pane_id, exc)
+            return
+        except Exception:
+            logger.warning("could not read %s for a summary", pane_id, exc_info=True)
+            return
+
+        read = response.get("read")
+        text = read.get("text") if isinstance(read, dict) else None
+        if not isinstance(text, str):
+            return
+
+        summary = await summariser.summarise(text)
+        if summary is None:
+            return
+        # The pane may have moved on, or gone, while we were waiting.
+        if pane_id not in self._panes:
+            return
+        self._summaries[pane_id] = summary
+        logger.info(
+            "summary for %s: %s%s",
+            pane_id,
+            summary.text,
+            f"  (+{len(summary.replies)} replies)" if summary.replies else "",
+        )
+        self._dirty.set()
+
+    def replies_for(self, pane_id: str) -> tuple[object, ...]:
+        """Suggested replies for a pane, if any were offered.
+
+        Exposed but unused: nothing sends these yet. Committing text to a live
+        agent session on a single keypress needs an interaction that cannot be
+        mistapped, and that has not been designed.
+        """
+        summary = self._summaries.get(pane_id)
+        return tuple(summary.replies) if summary else ()
 
     # ------------------------------------------------------------------ presses
 
@@ -424,6 +501,11 @@ class DeckController:
                 existing = self._panes.get(pane_id)
                 if existing is not None and existing.status != status:
                     self._panes[pane_id] = replace(existing, status=status)
+                    # The old summary described the previous state, so it is now
+                    # actively misleading -- drop it before anything repaints.
+                    self._summaries.pop(pane_id, None)
+                    if status in SUMMARISE_ON:
+                        self._request_summary(pane_id)
                     self._dirty.set()
             return
 
@@ -595,6 +677,10 @@ async def amain(argv: list[str] | None = None) -> int:
         use_device=not args.no_device,
         serial=args.serial,
     )
+
+    summariser = None if args.no_summaries else build_summariser()
+    if summariser is None and not args.no_summaries:
+        logger.info("no FIREWORKS_API_KEY found; running without pane summaries")
     surface.open()
 
     # Two connections -- herdr resets a connection that both subscribes and
@@ -602,7 +688,9 @@ async def amain(argv: list[str] | None = None) -> int:
     client = HerdrSession(Path(args.socket) if args.socket else None)
     await client.connect()
 
-    controller = DeckController(client, surface, mode=GroupingMode(args.mode))
+    controller = DeckController(
+        client, surface, mode=GroupingMode(args.mode), summariser=summariser
+    )
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -643,6 +731,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "what a column represents: 'workspace' (sidebar order) or 'tab' "
             "(tabs of the focused workspace). Default: workspace"
+        ),
+    )
+    parser.add_argument(
+        "--no-summaries",
+        action="store_true",
+        help=(
+            "skip the three-word pane summaries even if a key is configured. "
+            "They are already skipped when FIREWORKS_API_KEY is absent"
         ),
     )
     parser.add_argument(
