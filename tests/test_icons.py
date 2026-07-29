@@ -154,3 +154,40 @@ def test_override_missing_dir_is_not_an_error(
 
     monkeypatch.setenv("HERDR_PLUGIN_CONFIG_DIR", str(tmp_path))  # no icons/ inside
     assert resolve_override("claude") is None
+
+
+def test_the_resolved_font_covers_every_mark() -> None:
+    """Check the font this platform actually resolves, not just DejaVu.
+
+    PIL performs no font fallback: a glyph missing from the chosen face
+    renders as tofu, silently. DejaVu does not exist on macOS, so the loader
+    falls through to whatever that platform has -- and the marks include
+    symbols (U+2733, U+2032) that common text faces omit. This is the check
+    that would catch it, and it only means anything when run on that
+    platform, which is what the macOS CI leg is for.
+    """
+    fonttools = pytest.importorskip("fontTools.ttLib")
+    from pathlib import Path
+
+    from herdr_streamdeck.deck import load_font
+
+    font = load_font(30)
+    path = getattr(font, "path", None)
+    assert path, (
+        "no TrueType font resolved; PIL fell back to its bitmap default, "
+        "which renders every mark as unreadable fixed-size text"
+    )
+
+    font_path = Path(str(path))
+    try:
+        loaded = fonttools.TTFont(str(font_path), fontNumber=0)
+        cmap = loaded.getBestCmap()
+    except Exception as exc:  # pragma: no cover - platform dependent
+        pytest.skip(f"cannot inspect {font_path}: {exc}")
+
+    everything = {**MARKS, "<terminal>": TERMINAL}
+    missing = {
+        name: [c for c in mark.glyph if ord(c) not in cmap] for name, mark in everything.items()
+    }
+    missing = {name: chars for name, chars in missing.items() if chars}
+    assert not missing, f"{font_path.name} lacks glyphs: {missing}"
