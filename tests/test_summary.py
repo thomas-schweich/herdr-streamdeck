@@ -27,6 +27,7 @@ from herdr_streamdeck.summary import (
     Transport,
     api_key,
     build,
+    check,
     parse,
 )
 
@@ -386,3 +387,89 @@ def test_binding_the_count_does_not_mutate_the_shared_schema() -> None:
     """SCHEMA is a module constant; a per-call cap must not leak into it."""
     Summariser(transport=lambda b, t: envelope(GOOD), max_replies=9)._schema()
     assert "maxItems" not in SCHEMA["properties"]["responses"]
+
+
+# ------------------------------------------------------------------- retries
+
+
+def replying(*payloads: object) -> tuple[Transport, list[dict[str, object]]]:
+    """A transport that returns each payload in turn, recording what it was sent."""
+    seen: list[dict[str, object]] = []
+    queue = list(payloads)
+
+    def send(body: bytes, timeout: float) -> bytes:
+        seen.append(json.loads(body))
+        return envelope(queue.pop(0) if queue else GOOD)
+
+    return send, seen
+
+
+async def test_a_non_conforming_response_is_retried() -> None:
+    send, seen = replying({"summary": "no waiting field"}, GOOD)
+    summary = await Summariser(transport=send).summarise("x")
+    assert summary is not None
+    assert summary.phrase == "remove or deprecate"
+    assert len(seen) == 2, "it should have asked again"
+
+
+async def test_the_retry_says_what_was_wrong_and_restates_the_shape() -> None:
+    """A bare 'try again' invites the same mistake. The parser knows which
+    field it rejected, so the correction can name it."""
+    send, seen = replying({"summary": "no waiting field"}, GOOD)
+    await Summariser(transport=send).summarise("x")
+
+    messages = seen[1]["messages"]
+    assert isinstance(messages, list)
+    assert messages[2]["role"] == "assistant", "the model should see its own answer"
+    correction = messages[3]["content"]
+    assert "`waiting`" in correction
+    assert '"summary"' in correction, "the shape is restated in full"
+
+
+async def test_it_gives_up_after_the_attempt_limit() -> None:
+    bad = {"summary": "still no waiting field"}
+    send, seen = replying(bad, bad, bad, bad, bad)
+    assert await Summariser(transport=send, attempts=3).summarise("x") is None
+    assert len(seen) == 3, "exactly three tries, not more"
+
+
+async def test_a_good_first_answer_is_not_retried() -> None:
+    send, seen = replying(GOOD)
+    assert await Summariser(transport=send).summarise("x") is not None
+    assert len(seen) == 1
+
+
+async def test_transport_failures_are_not_retried() -> None:
+    """A timeout or a 429 will not be argued out of, and a stalled key is worse
+    than an absent summary."""
+    calls = 0
+
+    def failing(body: bytes, timeout: float) -> bytes:
+        nonlocal calls
+        calls += 1
+        raise urllib.error.HTTPError("url", 429, "Too Many", {}, None)  # type: ignore[arg-type]
+
+    assert await Summariser(transport=failing, attempts=3).summarise("x") is None
+    assert calls == 1
+
+
+async def test_the_transcript_is_not_resent_on_a_retry() -> None:
+    """It is the largest part of the request; the correction is a continuation
+    of the same conversation, not a fresh one."""
+    send, seen = replying({"summary": "bad"}, GOOD)
+    await Summariser(transport=send).summarise("PANE OUTPUT HERE")
+
+    second = seen[1]["messages"]
+    assert isinstance(second, list)
+    assert sum(1 for m in second if "PANE OUTPUT HERE" in str(m.get("content"))) == 1
+
+
+def test_check_explains_each_rejection() -> None:
+    for payload, expected in (
+        ({"summary": "x", "responses": []}, "waiting"),
+        ({"waiting": True, "summary": "in]valid", "responses": []}, "summary"),
+        ("not an object", "JSON object"),
+    ):
+        summary, reason = check(payload)
+        assert summary is None
+        assert expected in reason, f"{payload!r} -> {reason!r}"

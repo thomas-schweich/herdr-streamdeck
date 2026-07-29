@@ -151,14 +151,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 255 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 262 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 249 run anywhere, and pin the protocol quirks documented
+XDG default); the other 256 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

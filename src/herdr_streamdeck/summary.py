@@ -84,7 +84,17 @@ SCHEMA: dict[str, Any] = {
     },
 }
 
-SYSTEM_PROMPT = """You are summarising a response from a coding agent in 2-4
+SHAPE = """Return ONLY this JSON object, with every field present and no extra fields:
+{"waiting": <true|false>, "summary": "<2-4 short words>",
+ "responses": [{"kind": "affirmative"|"negative"|"proceed"|"alternative",
+                "label": "<1-3 words>", "text": "<full reply>"}]}
+`waiting` is required and must always be present. Every response object must have
+all three of kind, label and text."""
+"""The output shape, kept separate so a retry can restate it verbatim."""
+
+
+SYSTEM_PROMPT = (
+    """You are summarising a response from a coding agent in 2-4
 words, and generating a few possible short replies. The goal is to convey the
 agent's intent or question in few enough characters to display legibly on a
 small key.
@@ -128,12 +138,9 @@ Set `waiting` true ONLY when the agent is actually blocked awaiting an answer.
 That flag is about the agent's state, not about whether you offered replies.
 Each reply label is 1-3 short words.
 
-Return ONLY this JSON object, with every field present and no extra fields:
-{"waiting": <true|false>, "summary": "<2-4 short words>",
- "responses": [{"kind": "affirmative"|"negative"|"proceed"|"alternative",
-                "label": "<1-3 words>", "text": "<full reply>"}]}
-`waiting` is required and must always be present. Every response object must have
-all three of kind, label and text."""
+"""
+    + SHAPE
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +240,12 @@ def _phrase(value: object) -> str | None:
 
 
 def parse(payload: object) -> PaneSummary | None:
+    """Turn a model response into a summary, or None if it does not conform."""
+    summary, _ = check(payload)
+    return summary
+
+
+def check(payload: object) -> tuple[PaneSummary | None, str]:
     """Turn a model response into a summary, or None if it does not conform.
 
     A response that omits ``waiting`` is discarded rather than defaulted.
@@ -246,15 +259,15 @@ def parse(payload: object) -> PaneSummary | None:
     and is not waiting for anything.
     """
     if not isinstance(payload, dict):
-        return None
+        return None, "the response was not a JSON object"
 
     waiting = payload.get("waiting")
     if not isinstance(waiting, bool):
-        return None
+        return None, "`waiting` was missing or was not true/false"
 
     phrase = _phrase(payload.get("summary"))
     if phrase is None:
-        return None
+        return None, ("`summary` must be a few short words with no JSON punctuation in it")
 
     replies: list[Reply] = []
     raw_replies = payload.get("responses")
@@ -271,7 +284,7 @@ def parse(payload: object) -> PaneSummary | None:
                 continue
             replies.append(Reply(kind=kind, label=label.strip(), text=text.strip()))
 
-    return PaneSummary(phrase=phrase, waiting=waiting, replies=tuple(replies))
+    return PaneSummary(phrase=phrase, waiting=waiting, replies=tuple(replies)), ""
 
 
 @dataclass
@@ -294,6 +307,14 @@ class Summariser:
     returned four unprompted in 13 of 24 trials.
     """
 
+    attempts: int = 3
+    """How many times to ask before giving up.
+
+    A rejected response is usually one field away from usable, and the model is
+    fast enough that a correction round trip still lands inside a second. Each
+    retry shows the model its own output and names what was wrong with it.
+    """
+
     max_chars: int = 3000
     """How much scrollback to send. Measured: 3000 characters of real herdr pane
     output -- box drawing, spinners, status lines and all -- is about 240 prompt
@@ -307,7 +328,7 @@ class Summariser:
             "properties": {**SCHEMA["properties"], "responses": responses},
         }
 
-    def _body(self, transcript: str) -> bytes:
+    def _body(self, messages: list[dict[str, str]]) -> bytes:
         return json.dumps(
             {
                 "model": MODEL,
@@ -328,25 +349,16 @@ class Summariser:
                         "schema": self._schema(),
                     },
                 },
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": "Agent transcript:\n---\n"
-                        + transcript[-self.max_chars :]
-                        + "\n---",
-                    },
-                ],
+                "messages": messages,
             }
         ).encode()
 
-    async def summarise(self, transcript: str) -> PaneSummary | None:
-        """Summarise a pane's recent output. None on any failure at all."""
-        if not transcript.strip():
-            return None
+    async def _once(self, messages: list[dict[str, str]]) -> str | None:
+        """One request. Returns the raw assistant content, or None if the call
+        itself failed -- as opposed to succeeding with an unusable answer."""
         try:
             raw = await asyncio.wait_for(
-                asyncio.to_thread(self.transport, self._body(transcript), self.timeout),
+                asyncio.to_thread(self.transport, self._body(messages), self.timeout),
                 timeout=self.timeout + 1.0,
             )
         except TimeoutError:
@@ -360,16 +372,64 @@ class Summariser:
             return None
 
         try:
-            envelope = json.loads(raw)
-            content = envelope["choices"][0]["message"]["content"]
-            summary = parse(json.loads(content))
+            content = json.loads(raw)["choices"][0]["message"]["content"]
         except Exception:
             logger.warning("could not read summary response", exc_info=True)
             return None
+        return content if isinstance(content, str) else None
 
-        if summary is None:
-            logger.debug("summary did not conform to the schema; discarding")
-        return summary
+    async def summarise(self, transcript: str) -> PaneSummary | None:
+        """Summarise a pane's recent output. None on any failure at all.
+
+        A response that does not conform is retried, with the model shown its
+        own output and told what was wrong with it. Transport failures are not
+        retried: a timeout or a 429 will not be argued out of, and the deck is
+        better off with no summary than with a stalled key.
+        """
+        if not transcript.strip():
+            return None
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": "Agent transcript:\n---\n" + transcript[-self.max_chars :] + "\n---",
+            },
+        ]
+
+        for attempt in range(1, max(1, self.attempts) + 1):
+            content = await self._once(messages)
+            if content is None:
+                return None
+
+            try:
+                payload = json.loads(content)
+            except Exception:
+                payload = content
+
+            summary, reason = check(payload)
+            if summary is not None:
+                if attempt > 1:
+                    logger.info("summary conformed on attempt %d", attempt)
+                return summary
+
+            logger.debug("summary attempt %d rejected: %s", attempt, reason)
+            if attempt == max(1, self.attempts):
+                break
+            messages = [
+                *messages,
+                {"role": "assistant", "content": content},
+                {
+                    "role": "user",
+                    "content": (
+                        f"That did not match the schema: {reason}. "
+                        "Do not apologise or explain. " + SHAPE
+                    ),
+                },
+            ]
+
+        logger.debug("summary did not conform in %d attempts; discarding", self.attempts)
+        return None
 
 
 def api_key(env: dict[str, str] | None = None) -> str | None:
