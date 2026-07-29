@@ -31,9 +31,7 @@ from herdr_streamdeck.summary import (
 
 GOOD = {
     "waiting": True,
-    "verb": "asking",
-    "object": "endpoint",
-    "qualifier": "deprecation",
+    "summary": "remove or deprecate",
     "responses": [
         {"kind": "affirmative", "label": "Remove it", "text": "Remove the endpoint."},
         {"kind": "alternative", "label": "Deprecate", "text": "Keep it, warn on use."},
@@ -58,8 +56,7 @@ def transport_returning(payload: object) -> Transport:
 def test_a_well_formed_response_parses() -> None:
     summary = parse(GOOD)
     assert summary is not None
-    assert summary.words == ("asking", "endpoint", "deprecation")
-    assert summary.text == "asking endpoint deprecation"
+    assert summary.phrase == "remove or deprecate"
     assert summary.waiting is True
     assert summary.replies == (
         Reply("affirmative", "Remove it", "Remove the endpoint."),
@@ -83,27 +80,34 @@ def test_a_non_boolean_waiting_flag_is_rejected() -> None:
     "value",
     [
         "inverted]responses",  # real minimax-m3 output
-        "wrapper\nuserlabe",  # real minimax-m3 output
         'quoted"',
         "brace{",
-        "asking / endpoint",
-        "two words",
         "",
         "   ",
         None,
         42,
+        "the agent has finished refactoring and is now waiting for you to decide",
     ],
 )
-def test_a_field_that_is_not_one_word_is_rejected(value: object) -> None:
+def test_a_summary_that_is_not_a_short_label_is_rejected(value: object) -> None:
     """Rendering `inverted]responses` on a key looks like a bug in the deck.
     Rendering nothing looks like nothing, which is much cheaper."""
-    assert parse({**GOOD, "qualifier": value}) is None
+    assert parse({**GOOD, "summary": value}) is None
 
 
-def test_words_are_stripped() -> None:
-    summary = parse({**GOOD, "verb": "  asking\n"})
+def test_whitespace_is_normalised() -> None:
+    summary = parse({**GOOD, "summary": "  remove\n  or   deprecate,  "})
     assert summary is not None
-    assert summary.words[0] == "asking"
+    assert summary.phrase == "remove or deprecate"
+
+
+def test_a_label_that_runs_slightly_long_is_kept() -> None:
+    """The prompt asks for 2-4 words; the ceiling only catches prose. Throwing
+    away a good label for being one word over is the worse trade -- it renders
+    smaller, which is survivable, where nothing renders at all is not."""
+    summary = parse({**GOOD, "summary": "S3 retry added, tests pass"})
+    assert summary is not None
+    assert summary.phrase == "S3 retry added, tests pass"
 
 
 def test_replies_are_dropped_when_the_model_says_it_is_not_waiting() -> None:
@@ -120,7 +124,7 @@ def test_a_reply_with_an_unknown_kind_is_dropped_but_the_summary_survives() -> N
     summary = parse(payload)
     assert summary is not None
     assert summary.replies == ()
-    assert summary.words == ("asking", "endpoint", "deprecation")
+    assert summary.phrase == "remove or deprecate"
 
 
 def test_replies_shaped_the_way_nemotron_shaped_them_are_dropped() -> None:
@@ -159,7 +163,7 @@ async def test_a_summary_round_trips() -> None:
     summariser = Summariser(transport=transport_returning(GOOD))
     summary = await summariser.summarise("agent said something")
     assert summary == PaneSummary(
-        words=("asking", "endpoint", "deprecation"),
+        phrase="remove or deprecate",
         waiting=True,
         replies=(
             Reply("affirmative", "Remove it", "Remove the endpoint."),
@@ -196,7 +200,7 @@ async def test_the_schema_is_spelled_out_in_the_prompt_as_well_as_declared() -> 
     await Summariser(transport=send).summarise("x")
     fmt = seen[0]["response_format"]
     assert isinstance(fmt, dict) and fmt["type"] == "json_schema"
-    for field in ("waiting", "verb", "object", "qualifier", "responses"):
+    for field in ("waiting", "summary", "responses"):
         assert field in SYSTEM_PROMPT, f"{field} is not described in the prompt"
 
 
@@ -291,23 +295,24 @@ def test_an_explicit_key_builds_a_summariser() -> None:
 
 
 def test_a_question_mark_is_appended_rather_than_asked_for() -> None:
-    """`waiting` already says a question was asked, so a word spent restating
-    it is a third of the key wasted. The prompt's first version offered
-    "awaiting endpoint decision" as the example and produced
-    `asking / choice / deprecation`."""
-    summary = PaneSummary(words=("remove", "legacy", "endpoint"), waiting=True)
-    assert summary.display == ("remove", "legacy", "endpoint?")
-    assert summary.words == ("remove", "legacy", "endpoint")
+    """`waiting` already says a question was asked, so words spent restating it
+    are wasted. The prompt's first version offered "awaiting endpoint decision"
+    as the example and duly produced `asking choice deprecation`."""
+    summary = PaneSummary(phrase="remove or deprecate", waiting=True)
+    assert summary.display == "remove or deprecate?"
+    assert summary.phrase == "remove or deprecate"
 
 
 def test_no_question_mark_when_nothing_is_being_asked() -> None:
-    summary = PaneSummary(words=("fixed", "trigger", "verified"), waiting=False)
-    assert summary.display == ("fixed", "trigger", "verified")
+    assert PaneSummary(phrase="trigger fixed, verified", waiting=False).display == (
+        "trigger fixed, verified"
+    )
 
 
 def test_a_question_mark_is_not_doubled() -> None:
-    summary = PaneSummary(words=("epoch", "vs", "rolling?"), waiting=True)
-    assert summary.display == ("epoch", "vs", "rolling?")
+    assert PaneSummary(phrase="epoch or rolling?", waiting=True).display == (
+        "epoch or rolling?"
+    )
 
 
 @pytest.mark.parametrize(
@@ -320,7 +325,16 @@ def test_the_prompt_bans_words_that_only_restate_the_waiting_flag(word: str) -> 
 
 
 def test_the_prompt_shows_what_to_do_instead() -> None:
-    """A ban with no replacement just moves the problem; the examples are what
-    turned `asking / choice / deprecation` into `remove / legacy / endpoint`."""
+    """A ban with no replacement just moves the problem; the GOOD/BAD pairs are
+    what turned `asking choice deprecation` into `remove or deprecate`."""
     assert "GOOD" in SYSTEM_PROMPT and "BAD" in SYSTEM_PROMPT
-    assert "remove / legacy / endpoint" in SYSTEM_PROMPT
+    assert "remove or deprecate" in SYSTEM_PROMPT
+
+
+def test_the_prompt_describes_the_actual_display() -> None:
+    """The largest single effect in the formulation sweep. Naming the pixel size
+    and the line budget was the difference between `remove or deprecate login?`
+    and `auth refactored, tests pass?` -- same schema, same ban list, only the
+    framing changed."""
+    assert "72x72" in SYSTEM_PROMPT
+    assert "short" in SYSTEM_PROMPT

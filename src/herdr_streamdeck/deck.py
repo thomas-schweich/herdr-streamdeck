@@ -162,14 +162,14 @@ class ButtonFace:
 
     badge: str = ""
 
-    summary: tuple[str, ...] = ()
-    """Three words describing what the pane's agent just did or asked.
+    summary: str = ""
+    """A short phrase describing what the pane's agent just did or asked.
 
     When present the key switches to a text-forward layout: the mark shrinks to
-    a corner and the words take the middle. That is deliberate -- a summary only
-    exists on a status transition, which is exactly when the words matter more
-    than the identity, and the mark is redundant with the column you already
-    know. See summary.PaneSummary."""
+    a corner and the phrase takes the middle. That is deliberate -- a summary
+    only exists on a status transition, which is exactly when the words matter
+    more than the identity, and the mark is redundant with the column you
+    already know. See summary.PaneSummary."""
 
     status_color: RGB | None = None
     """Thin strip along the top edge. None draws no strip."""
@@ -541,28 +541,69 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace) -> ImageLike:
 SUMMARY_COLOR: RGB = (232, 232, 238)
 
 
-def _draw_summary(draw: ImageDrawLike, words: tuple[str, ...], width: int, height: int) -> None:
-    """Three words, one per line, filling the middle of the key.
+SUMMARY_LINES = 3
+SUMMARY_CAP = 18
+"""Largest summary type size. Above this a two-word label looks shouty next to
+the agent marks, which are the thing that should read first at a glance."""
 
-    Each line is sized independently to the widest it can be and still fit, so a
-    short word reads large and a long one stays inside the key rather than being
-    clipped. Uniform sizing would have to assume the longest word, wasting the
-    other two lines.
+
+def wrap_to_width(
+    draw: ImageDrawLike, text: str, font: ImageFontLike, budget: float
+) -> list[str] | None:
+    """Greedy word wrap, or None if any single word is wider than ``budget``.
+
+    A word that cannot fit on its own is the signal to try a smaller size --
+    breaking it mid-word would render `deprec` / `ate`, which is worse than
+    small.
     """
-    lines = [word for word in words if word][:3]
-    if not lines:
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        candidate = f"{current} {word}".strip()
+        if draw.textlength(candidate, font=font) <= budget:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        if draw.textlength(word, font=font) > budget:
+            return None
+        current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _draw_summary(draw: ImageDrawLike, text: str, width: int, height: int) -> None:
+    """A short phrase, wrapped and centred in the middle of the key.
+
+    One size for the whole block, chosen as the largest that fits. Sizing each
+    line to its own width reads as ransom-note typography -- the eye takes the
+    difference for emphasis and looks for a meaning that is not there.
+
+    A phrase rather than fixed words because the phrase says more in the same
+    space: `remove or deprecate?` names the alternatives, where the three-word
+    form gave `remove endpoint deprecation?`, which parses as a question about
+    un-deprecating something.
+    """
+    top = height * 0.30
+    available = height * 0.94 - top
+    budget = width * 0.92
+
+    for size in range(SUMMARY_CAP, MIN_MARK_SIZE - 1, -1):
+        font = load_font(size)
+        lines = wrap_to_width(draw, text, font, budget)
+        if lines is None or not lines:
+            continue
+        if len(lines) <= SUMMARY_LINES and len(lines) * size * 1.18 <= available:
+            break
+    else:
         return
 
-    top = height * 0.30
-    slot = (height * 0.94 - top) / len(lines)
-    budget = width * 0.90
-    cap = max(MIN_MARK_SIZE, int(slot * 0.86))
-
-    for index, word in enumerate(lines):
-        font = fit_font(draw, word, cap, budget)
+    slot = available / len(lines)
+    for index, line in enumerate(lines):
         draw.text(
             (width / 2, top + slot * (index + 0.5)),
-            word,
+            line,
             font=font,
             anchor="mm",
             fill=SUMMARY_COLOR,

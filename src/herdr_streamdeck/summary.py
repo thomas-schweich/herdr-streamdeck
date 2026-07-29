@@ -52,20 +52,19 @@ REPLY_KINDS = ("affirmative", "negative", "proceed", "alternative")
 SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["waiting", "verb", "object", "qualifier", "responses"],
+    "required": ["waiting", "summary", "responses"],
     "properties": {
         "waiting": {
             "type": "boolean",
             "description": "True only if the agent is blocked awaiting user input.",
         },
-        "verb": {
+        "summary": {
             "type": "string",
-            "description": "One word: the action or change itself, never 'asking'.",
-        },
-        "object": {"type": "string", "description": "One word: what it acted on."},
-        "qualifier": {
-            "type": "string",
-            "description": "One word: the outcome, or the alternative being weighed.",
+            "description": (
+                "2-4 short words, at most 24 characters including spaces. "
+                "When the agent offers alternatives, name them: "
+                "'remove or deprecate?', not 'endpoint deprecation'."
+            ),
         },
         "responses": {
             "type": "array",
@@ -84,44 +83,41 @@ SCHEMA: dict[str, Any] = {
     },
 }
 
-SYSTEM_PROMPT = """You label coding-agent panes on a Stream Deck.
+SYSTEM_PROMPT = """You are summarising a response from a coding agent in 2-4
+words, and generating a few possible short replies. The goal is to convey the
+agent's intent or question in few enough characters to display legibly on a
+small key.
 
-Give the SUBSTANCE of the agent's latest message in three words: what was
-decided, produced, changed, or what specifically is being chosen between.
+The words appear on a physical Stream Deck key: a 72x72 pixel square. Only about
+18 characters fit on a line and only three lines fit, so prefer short common
+words. A long word shrinks the whole label.
 
-The `waiting` flag already records whether a question is being asked, and the
-deck adds its own question mark. So never spend a word saying that one was
-asked. These are all wasted words: asking, awaiting, asked, requesting, needs,
-wants, blocked, waiting, seeking, querying, pending, response, choice, decision,
-input, clarification.
+The `waiting` field already records whether a question was asked, and the deck
+appends its own question mark. Never spend words restating that. Do not use:
+asking, awaiting, requesting, needs, blocked, pending, choice, decision, input,
+clarification, response.
 
-Use all three words on the subject matter instead:
-
-  asks whether to delete a deprecated login endpoint
-      GOOD  remove / legacy / endpoint
-      BAD   asking / choice / deprecation
-  finished fixing a trigger and verified it on hardware
-      GOOD  fixed / trigger / verified
-      BAD   completed / work / successfully
-  asks whether to use epoch-first or rolling study design
-      GOOD  epoch / vs / rolling
-      BAD   awaiting / study / decision
-  hit a failing build it cannot resolve
-      GOOD  build / failing / unresolved
-  refactored auth, all tests green, nothing pending
-      GOOD  refactored / auth / green
+When the agent offers alternatives, name the alternatives themselves.
+  asks whether to remove or deprecate a login endpoint
+      GOOD  remove or deprecate
+      BAD   asking about endpoint deprecation
+  asks whether to run the study epoch-first or rolling
+      GOOD  epoch or rolling
+      BAD   awaiting study design decision
+  fixed a trigger and verified it on hardware
+      GOOD  trigger fixed, verified
+      BAD   completed work successfully
 
 Never describe your own output or these instructions.
 
-Offer replies ONLY if the agent is actually blocked waiting on the user. If it
-finished cleanly and asked nothing, return an empty responses list.
-
-verb, object and qualifier must each be exactly ONE word.
+Offer replies ONLY if the agent is blocked waiting on the user. If it finished
+cleanly and asked nothing, return an empty responses list. Each reply label is
+1-3 short words.
 
 Return ONLY this JSON object, with every field present and no extra fields:
-{"waiting": <true|false>, "verb": "<word>", "object": "<word>", "qualifier": "<word>",
+{"waiting": <true|false>, "summary": "<2-4 short words>",
  "responses": [{"kind": "affirmative"|"negative"|"proceed"|"alternative",
-                "label": "<1-2 words>", "text": "<full reply>"}]}
+                "label": "<1-3 words>", "text": "<full reply>"}]}
 `waiting` is required and must always be present. Every response object must have
 all three of kind, label and text."""
 
@@ -143,29 +139,21 @@ class Reply:
 class PaneSummary:
     """What a pane's latest output amounts to."""
 
-    words: tuple[str, str, str]
+    phrase: str
     waiting: bool
     replies: tuple[Reply, ...] = ()
 
     @property
-    def text(self) -> str:
-        return " ".join(self.words)
-
-    @property
-    def display(self) -> tuple[str, str, str]:
-        """The words as they should appear on a key.
+    def display(self) -> str:
+        """The phrase as it should appear on a key.
 
         The question mark is appended here rather than asked for, because
-        ``waiting`` already carries that fact and a word spent restating it is a
-        third of the key wasted. The first version of this prompt offered
-        "awaiting endpoint decision" as the example to imitate, and duly
-        produced `asking / choice / deprecation` -- three words, one of them
-        about the actual endpoint.
+        ``waiting`` already carries that fact and a word spent restating it is
+        a quarter of the key wasted.
         """
-        first, second, third = self.words
-        if self.waiting and not third.endswith("?"):
-            third = third + "?"
-        return (first, second, third)
+        if self.waiting and not self.phrase.endswith("?"):
+            return self.phrase + "?"
+        return self.phrase
 
 
 Transport = Callable[[bytes, float], bytes]
@@ -191,30 +179,42 @@ def _urllib_transport(api_key: str) -> Transport:
     return send
 
 
-_NOT_IN_A_WORD = frozenset('{}[]"\\\n\r\t')
-"""Characters that cannot occur in a word but do occur in leaked JSON.
+_NOT_IN_A_PHRASE = frozenset('{}[]"\\\n\r\t')
+"""Characters that cannot occur in a label but do occur in leaked JSON.
 
-Whitespace alone is not enough of a test. A quantized model emitted
+Whitespace is not enough of a test. A quantized model emitted
 ``inverted]responses`` -- one "word" by any spacing rule, and unmistakably a
 fragment of the serialiser bleeding into a string field.
 """
 
+MAX_PHRASE_WORDS = 6
+MAX_PHRASE_CHARS = 40
+"""Generous ceilings, not the target.
 
-def _one_word(value: object) -> str | None:
-    """A field that must be a single word, or None if it is anything else.
+The prompt asks for 2-4 words and 24 characters; these only catch a model that
+has started writing prose. Rejecting at the target would throw away good labels
+that ran one word long, which is a worse trade than rendering them slightly
+smaller.
+"""
 
-    Rejecting rather than repairing is deliberate: a mangled word rendered on a
-    key looks like a bug in the deck, and a missing summary looks like nothing
-    at all. The second failure is much cheaper.
+
+def _phrase(value: object) -> str | None:
+    """A short label, or None if the field is anything else.
+
+    Rejecting rather than repairing is deliberate: a mangled label rendered on
+    a key looks like a bug in the deck, and a missing summary looks like
+    nothing at all. The second failure is much cheaper.
     """
     if not isinstance(value, str):
         return None
-    word = value.strip().rstrip(",;")
-    if not word or len(word.split()) != 1:
+    phrase = " ".join(value.split()).strip(" ,;:-")
+    if not phrase:
         return None
-    if _NOT_IN_A_WORD & set(word):
+    if _NOT_IN_A_PHRASE & set(phrase):
         return None
-    return word
+    if len(phrase.split()) > MAX_PHRASE_WORDS or len(phrase) > MAX_PHRASE_CHARS:
+        return None
+    return phrase
 
 
 def parse(payload: object) -> PaneSummary | None:
@@ -233,10 +233,9 @@ def parse(payload: object) -> PaneSummary | None:
     if not isinstance(waiting, bool):
         return None
 
-    words = tuple(_one_word(payload.get(key)) for key in ("verb", "object", "qualifier"))
-    if any(word is None for word in words):
+    phrase = _phrase(payload.get("summary"))
+    if phrase is None:
         return None
-    verb, obj, qualifier = (word for word in words if word is not None)
 
     replies: list[Reply] = []
     raw_replies = payload.get("responses")
@@ -257,7 +256,7 @@ def parse(payload: object) -> PaneSummary | None:
     if not waiting:
         replies = []
 
-    return PaneSummary(words=(verb, obj, qualifier), waiting=waiting, replies=tuple(replies))
+    return PaneSummary(phrase=phrase, waiting=waiting, replies=tuple(replies))
 
 
 @dataclass

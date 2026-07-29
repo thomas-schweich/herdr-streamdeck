@@ -217,7 +217,7 @@ class DeckController:
             # A user PNG in the plugin config dir replaces the glyph.
             icon=resolve_override(pane.mark_key),
             badge=pane.badge,
-            summary=summary.display if summary else (),
+            summary=summary.display if summary else "",
             status_color=STATUS_COLORS.get(pane.status),
         )
 
@@ -322,7 +322,7 @@ class DeckController:
         logger.info(
             "summary for %s: %s%s",
             pane_id,
-            summary.text,
+            summary.display,
             f"  (+{len(summary.replies)} replies)" if summary.replies else "",
         )
         self._dirty.set()

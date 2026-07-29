@@ -624,13 +624,13 @@ def summariser_returning(summary: PaneSummary | None, calls: list[str]) -> Summa
 
 
 SUMMARY = PaneSummary(
-    words=("remove", "legacy", "endpoint"),
+    phrase="remove or deprecate",
     waiting=True,
     replies=(Reply("affirmative", "Remove", "Remove it."),),
 )
-SHOWN = ("remove", "legacy", "endpoint?")
+SHOWN = "remove or deprecate?"
 """What reaches the key: the question mark is appended from `waiting`, not
-spent as one of the three words."""
+spent as one of the words."""
 
 
 async def test_blocking_asks_for_a_summary_and_shows_it() -> None:
@@ -717,7 +717,7 @@ async def test_a_new_status_drops_the_old_summary_immediately() -> None:
 
     controller.handle(status_changed("w1:p1", "working"))
     controller.repaint()
-    assert surface.faces[0].summary == ()
+    assert surface.faces[0].summary == ""
 
 
 async def test_a_failing_summariser_leaves_the_deck_working() -> None:
@@ -731,7 +731,7 @@ async def test_a_failing_summariser_leaves_the_deck_working() -> None:
     await asyncio.sleep(0)
     controller.repaint()
 
-    assert surface.faces[0].summary == ()
+    assert surface.faces[0].summary == ""
     assert surface.faces[0].mark == mark_for("claude").glyph, "the key still renders"
 
 
@@ -742,7 +742,7 @@ async def test_no_summariser_is_a_supported_state() -> None:
     await asyncio.sleep(0)
     controller.repaint()
 
-    assert surface.faces[0].summary == ()
+    assert surface.faces[0].summary == ""
     assert "pane.read" not in [r[0] for r in client.requests]
 
 
