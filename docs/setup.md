@@ -13,13 +13,26 @@ exist. The `streamdeck` Python package speaks raw HID directly.
 ## macOS
 
 ```bash
-./scripts/setup-macos.sh
+./scripts/setup-macos.sh          # installs hidapi, checks for conflicts
+uv sync
+uv run herdr-streamdeck --probe   # should list the deck
+uv run herdr-streamdeck -v        # run it
 ```
 
-Installs `hidapi` via Homebrew, warns if Elgato's software is running or sits in
-Login Items, and confirms the device is on the USB bus.
-
+`setup-macos.sh` installs `hidapi` via Homebrew, warns if Elgato's software is
+running or sits in Login Items, and confirms the device is on the USB bus.
 There is nothing to keep running, nothing to schedule, and no reboot step.
+
+**If `--probe` finds nothing**, the overwhelmingly likely cause is Elgato's own
+Stream Deck app: it claims the HID device exclusively, so nothing else can open
+it. Quit it, and remove it from Login Items or it returns after a reboot:
+
+```bash
+osascript -e 'quit app "Stream Deck"'
+```
+
+herdr must also be running on the same machine — the daemon talks to
+`$HERDR_SOCKET_PATH`, and without a herdr server there is nothing to display.
 
 ---
 
@@ -170,7 +183,7 @@ No hardware needed to develop against a live herdr server:
 
 ```bash
 uv sync
-uv run herdr-streamdeck --no-device --all-panes -v
+uv run herdr-streamdeck --no-device -v
 ```
 
 With a device attached:
