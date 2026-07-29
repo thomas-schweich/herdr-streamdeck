@@ -843,7 +843,10 @@ async def amain(argv: list[str] | None = None) -> int:
         serial=args.serial,
     )
 
-    summariser = None if args.no_summaries else build_summariser()
+    # One reply per row: the overlay is a single column, so asking for more
+    # would generate options the deck cannot show.
+    rows = surface.key_layout[0] or 3
+    summariser = None if args.no_summaries else build_summariser(max_replies=rows)
     if summariser is None and not args.no_summaries:
         logger.info("no FIREWORKS_API_KEY found; running without pane summaries")
     surface.open()

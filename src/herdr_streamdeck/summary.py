@@ -285,10 +285,27 @@ class Summariser:
 
     transport: Transport
     timeout: float = 6.0
+    max_replies: int = 3
+    """How many replies to ask for.
+
+    One per row of the deck: the overlay puts them in a single column, so a
+    fourth suggestion is unreachable however good it is. Asking for exactly what
+    fits stops the model spending tokens on an option nobody can press -- it
+    returned four unprompted in 13 of 24 trials.
+    """
+
     max_chars: int = 3000
     """How much scrollback to send. Measured: 3000 characters of real herdr pane
     output -- box drawing, spinners, status lines and all -- is about 240 prompt
     tokens and summarises correctly. More context did not improve the answer."""
+
+    def _schema(self) -> dict[str, Any]:
+        """The schema with the reply count bound to this deck's geometry."""
+        responses = {**SCHEMA["properties"]["responses"], "maxItems": self.max_replies}
+        return {
+            **SCHEMA,
+            "properties": {**SCHEMA["properties"], "responses": responses},
+        }
 
     def _body(self, transcript: str) -> bytes:
         return json.dumps(
@@ -305,7 +322,11 @@ class Summariser:
                 "reasoning_effort": "none",
                 "response_format": {
                     "type": "json_schema",
-                    "json_schema": {"name": "pane", "strict": True, "schema": SCHEMA},
+                    "json_schema": {
+                        "name": "pane",
+                        "strict": True,
+                        "schema": self._schema(),
+                    },
                 },
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
@@ -378,7 +399,7 @@ def api_key(env: dict[str, str] | None = None) -> str | None:
     return None
 
 
-def build(key: str | None = None) -> Summariser | None:
+def build(key: str | None = None, max_replies: int = 3) -> Summariser | None:
     """A summariser, or None when no key is configured.
 
     None is a supported state, not an error: the deck runs exactly as it did
@@ -387,4 +408,4 @@ def build(key: str | None = None) -> Summariser | None:
     resolved = key or api_key()
     if not resolved:
         return None
-    return Summariser(transport=_urllib_transport(resolved))
+    return Summariser(transport=_urllib_transport(resolved), max_replies=max_replies)

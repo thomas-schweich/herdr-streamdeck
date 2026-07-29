@@ -19,6 +19,7 @@ import pytest
 from herdr_streamdeck.summary import (
     MODEL,
     REPLY_KINDS,
+    SCHEMA,
     SYSTEM_PROMPT,
     PaneSummary,
     Reply,
@@ -345,3 +346,43 @@ def test_the_prompt_describes_the_actual_display() -> None:
     framing changed."""
     assert "72x72" in SYSTEM_PROMPT
     assert "short" in SYSTEM_PROMPT
+
+
+def test_the_reply_count_is_bound_to_the_deck_geometry() -> None:
+    """The overlay is one column, so a fourth suggestion is unreachable however
+    good it is. Left unbound the model returned four in 13 of 24 trials, and
+    the log reported them as available."""
+    seen: list[dict[str, object]] = []
+
+    def send(body: bytes, timeout: float) -> bytes:
+        seen.append(json.loads(body))
+        return envelope(GOOD)
+
+    import asyncio
+
+    asyncio.run(Summariser(transport=send, max_replies=3).summarise("x"))
+    fmt = seen[0]["response_format"]
+    assert isinstance(fmt, dict)
+    schema = fmt["json_schema"]["schema"]
+    assert schema["properties"]["responses"]["maxItems"] == 3
+
+
+def test_a_taller_deck_may_ask_for_more() -> None:
+    seen: list[dict[str, object]] = []
+
+    def send(body: bytes, timeout: float) -> bytes:
+        seen.append(json.loads(body))
+        return envelope(GOOD)
+
+    import asyncio
+
+    asyncio.run(Summariser(transport=send, max_replies=4).summarise("x"))
+    fmt = seen[0]["response_format"]
+    assert isinstance(fmt, dict)
+    assert fmt["json_schema"]["schema"]["properties"]["responses"]["maxItems"] == 4
+
+
+def test_binding_the_count_does_not_mutate_the_shared_schema() -> None:
+    """SCHEMA is a module constant; a per-call cap must not leak into it."""
+    Summariser(transport=lambda b, t: envelope(GOOD), max_replies=9)._schema()
+    assert "maxItems" not in SCHEMA["properties"]["responses"]
