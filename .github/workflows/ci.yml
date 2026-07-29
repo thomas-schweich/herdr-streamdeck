@@ -156,6 +156,28 @@ jobs:
       - run: uv lock --check
       - run: uv build
 
+      # The renderer loads its font from inside the installed package, so a
+      # wheel without it produces a deck of tofu. Nothing else would catch
+      # that: the tests all run from the source tree, where the file is
+      # present whether or not the build backend would have included it.
+      - name: Font ships in the wheel
+        run: |
+          uv run --no-project --python 3.12 python - <<'PY'
+          import glob, sys, zipfile
+
+          wheel = glob.glob("dist/*.whl")[0]
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = {
+              "herdr_streamdeck/fonts/DejaVuSansMono.ttf",
+              # Bitstream Vera permits redistribution only with its notice.
+              "herdr_streamdeck/fonts/LICENSE-DejaVu.txt",
+          }
+          missing = sorted(required - names)
+          if missing:
+              sys.exit(f"{wheel} is missing {missing}")
+          print(f"font and licence present in {wheel}")
+          PY
+
       # herdr-plugin.toml is not exercised by any test, but a typo here breaks
       # `herdr plugin install` for every user. Validate it structurally.
       - name: Validate herdr-plugin.toml

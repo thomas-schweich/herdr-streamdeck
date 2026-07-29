@@ -35,24 +35,62 @@ logger = logging.getLogger(__name__)
 RGB = tuple[int, int, int]
 
 
+FONT_PATH = Path(__file__).parent / "fonts" / "DejaVuSansMono.ttf"
+"""The one font, shipped with the package.
+
+Monospace suits the subject -- these are terminal panes -- and it sidesteps a
+practical problem with proportional faces at this size: kerning pairs that look
+fine in running text read as uneven when the string is eight characters on a
+72px key.
+
+Bundling rather than searching the system removes a whole class of problem. A
+search chain renders differently on every machine, degrades silently to a font
+missing the glyphs it needs, and cannot be tested on a platform without going
+and installing fonts there first. DejaVu Sans Mono specifically because it is
+the only redistributable monospace font checked that carries U+2733, the
+eight-spoked asterisk standing in for Claude's starburst -- JetBrains Mono,
+Noto Sans Mono, Ubuntu Mono and Liberation Mono all lack it.
+
+Licensing is in fonts/LICENSE-DejaVu.txt: Bitstream Vera, which permits
+redistribution provided that notice ships alongside.
+"""
+
+
 @lru_cache(maxsize=64)
 def load_font(size: int) -> ImageFontLike:
-    """A font at a given size, cached.
+    """The bundled font at a given size, cached.
 
     Font loading dominated rendering before this: a full key render measured
     1.26 ms, against 0.03 ms for the JPEG encode alone.
     """
     from PIL import ImageFont
 
-    for name in ("DejaVuSans.ttf", "Arial Unicode.ttf", "Helvetica.ttc"):
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
-    # Bundled bitmap fallback: ugly, fixed-size, but never missing. Every glyph
-    # in icons.MARKS is verified present in DejaVu, so this is only reached on
-    # a system with no usable TrueType font at all.
-    return ImageFont.load_default()
+    try:
+        return ImageFont.truetype(str(FONT_PATH), size)
+    except OSError:
+        # Only reachable if the package was installed without its data files.
+        # A bitmap fallback keeps the deck lit, but it is fixed-size and lacks
+        # most of the marks, so say so loudly rather than shipping tofu quietly.
+        logger.warning("bundled font missing at %s; keys will render poorly", FONT_PATH)
+        return ImageFont.load_default()
+
+
+def fit_font(draw: ImageDrawLike, text: str, size: int, budget: float) -> ImageFontLike:
+    """The largest font at or below ``size`` whose ``text`` fits in ``budget``.
+
+    Marks carry a per-agent scale multiplier, but those are an intent -- "the
+    single-letter ones want to be bigger" -- not a measurement, and a fixed
+    multiplier cannot know the metrics of whichever font a machine resolved.
+    Measuring instead means a long mark like ``copilot`` shrinks to fit rather
+    than running off the key, on any font, without sixteen tuned constants.
+    """
+    while size > MIN_MARK_SIZE and draw.textlength(text, font=load_font(size)) > budget:
+        size -= 1
+    return load_font(size)
+
+
+MIN_MARK_SIZE = 8
+"""Below this a mark is unreadable, so overflow beats shrinking further."""
 
 
 @lru_cache(maxsize=32)
@@ -440,7 +478,8 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace, theme: Theme) ->
             drew_icon = True
 
     if face.mark and not drew_icon:
-        mark_font = load_font(max(9, int(height * 0.36 * face.mark_scale)))
+        nominal = max(MIN_MARK_SIZE, int(height * 0.36 * face.mark_scale))
+        mark_font = fit_font(draw, face.mark, nominal, width * 0.84)
         draw.text(
             (width / 2, height / 2 - height * 0.06),
             face.mark,

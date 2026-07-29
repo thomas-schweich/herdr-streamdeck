@@ -6,9 +6,9 @@ Deliberately typographic rather than pictorial. Three reasons:
   reads as mush, while a one or two character mark stays legible.
 * Redistributing vendor trademarks in an MIT-licensed repository is a
   licensing question this project should not have to own.
-* Every glyph here is verified present in DejaVu Sans, the font the renderer
-  falls back to, so nothing degrades into tofu on a machine without extra
-  fonts installed.
+* Every glyph here is verified present in the font the package ships, so
+  nothing degrades into tofu on a machine with no fonts installed at all.
+  Notably U+2733, which most monospace faces omit -- see deck.FONT_PATH.
 
 Users who want real logos can drop PNGs into the icon override directory
 instead; see ``resolve_override``.
@@ -36,7 +36,13 @@ class AgentMark:
     glyph: str
     color: RGB = NEUTRAL
     scale: float = 1.0
-    """Font-size multiplier. Longer marks shrink to stay inside the key."""
+    """Font-size multiplier, expressing intent rather than a fit.
+
+    Single-letter marks want to be large, ``copilot`` cannot be. It is only a
+    starting point: the renderer measures the mark and shrinks it further if it
+    would overrun the key, so a value that is too generous costs nothing. See
+    deck.fit_font.
+    """
 
 
 # Keys are herdr's agent identifiers. Its detection enum at protocol 17 is:

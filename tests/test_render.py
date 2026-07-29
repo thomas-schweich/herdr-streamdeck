@@ -161,3 +161,64 @@ def test_an_overlong_badge_is_truncated_rather_than_overflowing() -> None:
     alpha = compose_foreground(SIZE, face, DARK).getchannel("A").tobytes()
     # The badge is inset from the lower-right; nothing may reach the left edge.
     assert all(alpha[y * WIDTH] == 0 for y in range(HEIGHT))
+
+
+# ------------------------------------------------------------------ mark fitting
+
+
+def test_every_mark_fits_inside_its_key() -> None:
+    """The per-agent scales are hand-set intent, not measurements, so the
+    renderer has to guarantee this rather than trust them. `copilot` at its
+    nominal size overruns a 72px key by a wide margin."""
+    from PIL import Image, ImageDraw
+
+    from herdr_streamdeck.deck import MIN_MARK_SIZE, fit_font
+    from herdr_streamdeck.icons import MARKS, TERMINAL
+
+    draw = ImageDraw.Draw(Image.new("RGB", SIZE))
+    budget = WIDTH * 0.84
+    for name, mark in {**MARKS, "<terminal>": TERMINAL}.items():
+        nominal = max(MIN_MARK_SIZE, int(HEIGHT * 0.36 * mark.scale))
+        font = fit_font(draw, mark.glyph, nominal, budget)
+        assert draw.textlength(mark.glyph, font=font) <= budget, f"{name} overruns"
+
+
+def point_size(font: object) -> float:
+    """The size a font was loaded at.
+
+    Only the TrueType face records one; the bitmap fallback has no size to
+    report, and reaching it here would mean the bundled font failed to load.
+    """
+    from PIL import ImageFont
+
+    assert isinstance(font, ImageFont.FreeTypeFont), "bundled font did not load"
+    return font.size
+
+
+def test_fitting_leaves_marks_that_already_fit_alone() -> None:
+    """Shrinking a single glyph that fits would waste the key."""
+    from PIL import Image, ImageDraw
+
+    from herdr_streamdeck.deck import fit_font
+
+    draw = ImageDraw.Draw(Image.new("RGB", SIZE))
+    assert point_size(fit_font(draw, "C", 36, WIDTH * 0.84)) == 36
+
+
+def test_fitting_stops_before_a_mark_becomes_unreadable() -> None:
+    """An absurd budget must not shrink text to nothing -- overflowing is the
+    better failure, since at least something is visible."""
+    from PIL import Image, ImageDraw
+
+    from herdr_streamdeck.deck import MIN_MARK_SIZE, fit_font
+
+    draw = ImageDraw.Draw(Image.new("RGB", SIZE))
+    assert point_size(fit_font(draw, "copilot", 36, 1.0)) == MIN_MARK_SIZE
+
+
+def test_the_mark_stays_within_the_key_bounds() -> None:
+    """End to end: nothing drawn may touch the left or right edge."""
+    face = ButtonFace(mark="copilot", mark_scale=0.62, background=DARK.background)
+    alpha = compose_foreground(SIZE, face, DARK).getchannel("A").tobytes()
+    for y in range(HEIGHT):
+        assert alpha[y * WIDTH] == 0 and alpha[y * WIDTH + WIDTH - 1] == 0

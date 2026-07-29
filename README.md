@@ -61,6 +61,15 @@ Agent marks are typographic by default. Drop a PNG named after the agent into
 `$HERDR_PLUGIN_CONFIG_DIR/icons/` (e.g. `claude.png`) to use your own artwork
 instead.
 
+Everything is set in DejaVu Sans Mono, which ships inside the package rather
+than being looked up on the host. Monospace because these are terminal panes
+and proportional kerning reads as uneven at eight characters on a 72px key;
+bundled because a search chain renders differently on every machine and
+degrades silently to a face missing the glyphs it needs. DejaVu specifically
+because it is the only redistributable mono font checked that has U+2733, the
+asterisk standing in for Claude's starburst. Marks are then measured and shrunk
+to fit, so a long one like `copilot` cannot overrun its key.
+
 ## Status
 
 Working end to end on a Stream Deck MK.2 (15 keys): panes render with
@@ -114,14 +123,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 209 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 211 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 203 run anywhere, and pin the protocol quirks documented
+XDG default); the other 205 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

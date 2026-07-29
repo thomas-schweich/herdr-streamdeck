@@ -6,6 +6,9 @@ invisible in code review but obvious -- and useless -- on the device.
 
 from __future__ import annotations
 
+import string
+from pathlib import Path
+
 import pytest
 
 from herdr_streamdeck.icons import MARKS, TERMINAL, mark_for, normalise
@@ -51,26 +54,6 @@ def test_every_herdr_agent_has_a_mark() -> None:
     }
     assert enum <= set(MARKS), f"unmarked agents: {enum - set(MARKS)}"
     assert "qwencode" in MARKS
-
-
-def test_marks_render_in_dejavu() -> None:
-    """A glyph the fallback font lacks would draw as tofu.
-
-    Covers TERMINAL as well as MARKS: an earlier version checked only MARKS,
-    and the terminal mark -- which lives outside it -- went unverified.
-    """
-    fonttools = pytest.importorskip("fontTools.ttLib")
-    from pathlib import Path
-
-    font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-    if not font_path.exists():
-        pytest.skip("DejaVu not installed on this platform")
-
-    cmap = fonttools.TTFont(str(font_path)).getBestCmap()
-    everything = {**MARKS, "<terminal>": TERMINAL}
-    for name, mark in everything.items():
-        missing = [c for c in mark.glyph if ord(c) not in cmap]
-        assert not missing, f"{name}: {missing!r} absent from DejaVu"
 
 
 @pytest.mark.parametrize(
@@ -157,38 +140,56 @@ def test_override_missing_dir_is_not_an_error(
     assert resolve_override("claude") is None
 
 
-def test_the_resolved_font_covers_every_mark() -> None:
-    """Check the font this platform actually resolves, not just DejaVu.
+def test_the_bundled_font_covers_every_mark() -> None:
+    """PIL performs no font fallback: a glyph missing from the chosen face
+    renders as tofu, silently.
 
-    PIL performs no font fallback: a glyph missing from the chosen face
-    renders as tofu, silently. DejaVu does not exist on macOS, so the loader
-    falls through to whatever that platform has -- and the marks include
-    symbols (U+2733, U+2032) that common text faces omit. This is the check
-    that would catch it, and it only means anything when run on that
-    platform, which is what the macOS CI leg is for.
+    Bundling one font makes this checkable once, here, instead of hoping the
+    macOS CI leg happens to resolve a face with U+2733 in it. If a mark is ever
+    added that DejaVu Sans Mono lacks, this fails on every platform at once.
     """
     fonttools = pytest.importorskip("fontTools.ttLib")
-    from pathlib import Path
 
-    from herdr_streamdeck.deck import load_font
+    from herdr_streamdeck.deck import FONT_PATH
 
-    font = load_font(30)
-    path = getattr(font, "path", None)
-    assert path, (
-        "no TrueType font resolved; PIL fell back to its bitmap default, "
-        "which renders every mark as unreadable fixed-size text"
-    )
+    assert FONT_PATH.is_file(), f"the bundled font is missing from {FONT_PATH}"
 
-    font_path = Path(str(path))
-    try:
-        loaded = fonttools.TTFont(str(font_path), fontNumber=0)
-        cmap = loaded.getBestCmap()
-    except Exception as exc:  # pragma: no cover - platform dependent
-        pytest.skip(f"cannot inspect {font_path}: {exc}")
-
+    cmap = fonttools.TTFont(str(FONT_PATH)).getBestCmap()
     everything = {**MARKS, "<terminal>": TERMINAL}
     missing = {
         name: [c for c in mark.glyph if ord(c) not in cmap] for name, mark in everything.items()
     }
     missing = {name: chars for name, chars in missing.items() if chars}
-    assert not missing, f"{font_path.name} lacks glyphs: {missing}"
+    assert not missing, f"{FONT_PATH.name} lacks glyphs: {missing}"
+
+
+def test_the_bundled_font_covers_badge_text() -> None:
+    """Badges show arbitrary pane names, so the alphabet matters too -- plus
+    the ellipsis the badge appends when it has to truncate."""
+    fonttools = pytest.importorskip("fontTools.ttLib")
+
+    from herdr_streamdeck.deck import FONT_PATH
+
+    cmap = fonttools.TTFont(str(FONT_PATH)).getBestCmap()
+    alphabet = string.ascii_letters + string.digits + " -_.:/#@()[]" + "\u2026"
+    missing = [c for c in alphabet if ord(c) not in cmap]
+    assert not missing, f"{FONT_PATH.name} lacks {missing!r}"
+
+
+def test_the_loader_actually_uses_the_bundled_font() -> None:
+    """A regression guard: the loader used to search the system, and a machine
+    with a different DejaVu on its path would render differently."""
+    from herdr_streamdeck.deck import FONT_PATH, load_font
+
+    font = load_font(30)
+    assert Path(str(getattr(font, "path", ""))) == FONT_PATH
+
+
+def test_the_font_licence_ships_beside_it() -> None:
+    """Bitstream Vera permits redistribution only if the notice travels with
+    the font, so shipping the .ttf without this file would be a violation."""
+    from herdr_streamdeck.deck import FONT_PATH
+
+    licence = FONT_PATH.parent / "LICENSE-DejaVu.txt"
+    assert licence.is_file(), "bundled font has no licence notice beside it"
+    assert "Bitstream Vera" in licence.read_text()
