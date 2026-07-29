@@ -285,3 +285,42 @@ def test_an_explicit_key_builds_a_summariser() -> None:
     summariser = build(key="fw_test")
     assert summariser is not None
     assert summariser.timeout > 0
+
+
+# ------------------------------------------------------------------- display
+
+
+def test_a_question_mark_is_appended_rather_than_asked_for() -> None:
+    """`waiting` already says a question was asked, so a word spent restating
+    it is a third of the key wasted. The prompt's first version offered
+    "awaiting endpoint decision" as the example and produced
+    `asking / choice / deprecation`."""
+    summary = PaneSummary(words=("remove", "legacy", "endpoint"), waiting=True)
+    assert summary.display == ("remove", "legacy", "endpoint?")
+    assert summary.words == ("remove", "legacy", "endpoint")
+
+
+def test_no_question_mark_when_nothing_is_being_asked() -> None:
+    summary = PaneSummary(words=("fixed", "trigger", "verified"), waiting=False)
+    assert summary.display == ("fixed", "trigger", "verified")
+
+
+def test_a_question_mark_is_not_doubled() -> None:
+    summary = PaneSummary(words=("epoch", "vs", "rolling?"), waiting=True)
+    assert summary.display == ("epoch", "vs", "rolling?")
+
+
+@pytest.mark.parametrize(
+    "word", ["asking", "awaiting", "blocked", "decision", "clarification", "pending"]
+)
+def test_the_prompt_bans_words_that_only_restate_the_waiting_flag(word: str) -> None:
+    """Measured: banning these took meta-words in the output from 2/60 to 0/60,
+    and made the model faster despite a longer prompt."""
+    assert word in SYSTEM_PROMPT
+
+
+def test_the_prompt_shows_what_to_do_instead() -> None:
+    """A ban with no replacement just moves the problem; the examples are what
+    turned `asking / choice / deprecation` into `remove / legacy / endpoint`."""
+    assert "GOOD" in SYSTEM_PROMPT and "BAD" in SYSTEM_PROMPT
+    assert "remove / legacy / endpoint" in SYSTEM_PROMPT

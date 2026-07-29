@@ -624,10 +624,13 @@ def summariser_returning(summary: PaneSummary | None, calls: list[str]) -> Summa
 
 
 SUMMARY = PaneSummary(
-    words=("asking", "endpoint", "removal"),
+    words=("remove", "legacy", "endpoint"),
     waiting=True,
     replies=(Reply("affirmative", "Remove", "Remove it."),),
 )
+SHOWN = ("remove", "legacy", "endpoint?")
+"""What reaches the key: the question mark is appended from `waiting`, not
+spent as one of the three words."""
 
 
 async def test_blocking_asks_for_a_summary_and_shows_it() -> None:
@@ -642,7 +645,7 @@ async def test_blocking_asks_for_a_summary_and_shows_it() -> None:
     controller.repaint()
 
     assert calls == ["agent output"], "the pane's own output should be summarised"
-    assert surface.faces[0].summary == ("asking", "endpoint", "removal")
+    assert surface.faces[0].summary == SHOWN
     assert [r[0] for r in client.requests].count("pane.read") == 1
 
 
@@ -676,7 +679,7 @@ async def test_finishing_a_turn_is_summarised() -> None:
     controller.repaint()
 
     assert calls == ["agent output"]
-    assert surface.faces[0].summary == ("asking", "endpoint", "removal")
+    assert surface.faces[0].summary == SHOWN
 
 
 @pytest.mark.parametrize(

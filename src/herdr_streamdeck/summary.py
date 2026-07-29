@@ -60,12 +60,12 @@ SCHEMA: dict[str, Any] = {
         },
         "verb": {
             "type": "string",
-            "description": "One word: what the agent DID or IS DOING.",
+            "description": "One word: the action or change itself, never 'asking'.",
         },
         "object": {"type": "string", "description": "One word: what it acted on."},
         "qualifier": {
             "type": "string",
-            "description": "One word: the outcome or the open question.",
+            "description": "One word: the outcome, or the alternative being weighed.",
         },
         "responses": {
             "type": "array",
@@ -86,12 +86,32 @@ SCHEMA: dict[str, Any] = {
 
 SYSTEM_PROMPT = """You label coding-agent panes on a Stream Deck.
 
-Describe the END STATE of the agent's latest message: what was decided, produced,
-or asked. Not the topic. "Auth module" is a topic and is wrong; "awaiting endpoint
-decision" is a state. Never describe your own output or these instructions.
+Give the SUBSTANCE of the agent's latest message in three words: what was
+decided, produced, changed, or what specifically is being chosen between.
 
-Precedence: if the latest message ends by asking the user something, describe that
-question. Only if nothing is being asked do you describe the outcome.
+The `waiting` flag already records whether a question is being asked, and the
+deck adds its own question mark. So never spend a word saying that one was
+asked. These are all wasted words: asking, awaiting, asked, requesting, needs,
+wants, blocked, waiting, seeking, querying, pending, response, choice, decision,
+input, clarification.
+
+Use all three words on the subject matter instead:
+
+  asks whether to delete a deprecated login endpoint
+      GOOD  remove / legacy / endpoint
+      BAD   asking / choice / deprecation
+  finished fixing a trigger and verified it on hardware
+      GOOD  fixed / trigger / verified
+      BAD   completed / work / successfully
+  asks whether to use epoch-first or rolling study design
+      GOOD  epoch / vs / rolling
+      BAD   awaiting / study / decision
+  hit a failing build it cannot resolve
+      GOOD  build / failing / unresolved
+  refactored auth, all tests green, nothing pending
+      GOOD  refactored / auth / green
+
+Never describe your own output or these instructions.
 
 Offer replies ONLY if the agent is actually blocked waiting on the user. If it
 finished cleanly and asked nothing, return an empty responses list.
@@ -130,6 +150,22 @@ class PaneSummary:
     @property
     def text(self) -> str:
         return " ".join(self.words)
+
+    @property
+    def display(self) -> tuple[str, str, str]:
+        """The words as they should appear on a key.
+
+        The question mark is appended here rather than asked for, because
+        ``waiting`` already carries that fact and a word spent restating it is a
+        third of the key wasted. The first version of this prompt offered
+        "awaiting endpoint decision" as the example to imitate, and duly
+        produced `asking / choice / deprecation` -- three words, one of them
+        about the actual endpoint.
+        """
+        first, second, third = self.words
+        if self.waiting and not third.endswith("?"):
+            third = third + "?"
+        return (first, second, third)
 
 
 Transport = Callable[[bytes, float], bytes]

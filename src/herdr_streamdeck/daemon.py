@@ -217,7 +217,7 @@ class DeckController:
             # A user PNG in the plugin config dir replaces the glyph.
             icon=resolve_override(pane.mark_key),
             badge=pane.badge,
-            summary=summary.words if summary else (),
+            summary=summary.display if summary else (),
             status_color=STATUS_COLORS.get(pane.status),
         )
 
