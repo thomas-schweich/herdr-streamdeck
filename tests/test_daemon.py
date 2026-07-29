@@ -14,6 +14,7 @@ from herdr_streamdeck.daemon import (
     STRUCTURAL_EVENTS,
     DeckController,
     _iter_panes,
+    worth_summarising,
 )
 from herdr_streamdeck.deck import ButtonFace, NullSurface, PressHandler
 from herdr_streamdeck.icons import mark_for
@@ -645,7 +646,7 @@ async def test_blocking_asks_for_a_summary_and_shows_it() -> None:
     assert [r[0] for r in client.requests].count("pane.read") == 1
 
 
-async def test_a_working_pane_is_not_summarised() -> None:
+async def test_a_pane_starting_work_is_not_summarised() -> None:
     """Summaries cost money and a working pane changes constantly."""
     calls: list[str] = []
     controller, _, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
@@ -656,6 +657,45 @@ async def test_a_working_pane_is_not_summarised() -> None:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert calls == []
+
+
+async def test_finishing_a_turn_is_summarised() -> None:
+    """The transition that actually happens. herdr emits `working` then `idle`
+    when an agent completes -- verified by driving a real agent through a full
+    turn. An earlier version keyed on `done`, which a pane never reaches, so
+    summaries fired essentially never."""
+    calls: list[str] = []
+    controller, surface, _ = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
+    controller._summariser = summariser_returning(SUMMARY, calls)
+    await controller.prime()
+
+    controller.handle(status_changed("w1:p1", "working"))
+    controller.handle(status_changed("w1:p1", "idle"))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    controller.repaint()
+
+    assert calls == ["agent output"]
+    assert surface.faces[0].summary == ("asking", "endpoint", "removal")
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        ("working", "idle", True),  # what herdr actually emits on completion
+        ("working", "blocked", True),
+        ("working", "done", True),  # in the enum, never observed on a pane
+        ("idle", "blocked", True),  # arriving blocked always deserves words
+        ("idle", "working", False),
+        ("unknown", "idle", False),  # a pane merely being seen for the first time
+        ("idle", "idle", False),
+        ("working", "working", False),
+    ],
+)
+def test_which_transitions_are_worth_a_model_call(
+    before: str, after: str, expected: bool
+) -> None:
+    assert worth_summarising(before, after) is expected
 
 
 async def test_a_new_status_drops_the_old_summary_immediately() -> None:

@@ -68,13 +68,25 @@ STATUS_COLORS: dict[str, RGB] = {
     "idle": (82, 82, 91),  # grey  -- waiting, seen
 }
 
-SUMMARISE_ON = frozenset({"blocked", "done"})
-"""Statuses worth paying a model to explain.
 
-Only transitions *into* these, and only these two: `blocked` is the state the
-deck cannot resolve on its own, and `done` is the one you act on. Summarising
-`working` would fire continuously for no gain, and `idle` says all there is to
-say already."""
+def worth_summarising(before: str, after: str) -> bool:
+    """Whether a status transition is worth paying a model to explain.
+
+    The trigger is **leaving `working`**, not arriving anywhere in particular.
+    That is a correction: an earlier version keyed on arriving at `blocked` or
+    `done`, and fired almost never. herdr's schema lists `done` in its
+    `AgentStatus` enum, but a pane never reaches it -- driving a real agent
+    through a complete turn emits exactly `working` then `idle`, 1.5s apart.
+
+    Leaving `working` is also the better semantic anyway: it means "the agent
+    stopped", which is when its last message became worth reading, whatever
+    status it landed on. `blocked` is included from any state because arriving
+    there is always worth explaining.
+    """
+    if before == after:
+        return False
+    return before == "working" or after == "blocked"
+
 
 ANIMATION_FPS = 20
 """Frame rate for pulsing and blinking.
@@ -504,7 +516,7 @@ class DeckController:
                     # The old summary described the previous state, so it is now
                     # actively misleading -- drop it before anything repaints.
                     self._summaries.pop(pane_id, None)
-                    if status in SUMMARISE_ON:
+                    if worth_summarising(existing.status, status):
                         self._request_summary(pane_id)
                     self._dirty.set()
             return
