@@ -14,8 +14,8 @@ Users who want real logos can drop PNGs into the icon override directory
 instead; see ``resolve_override``.
 
 Marks are chosen to be collision-free at a glance: no two share a rendered
-form. Codex takes the bare ``C`` and Copilot spells its name out, because a
-single letter cannot serve both.
+form. Copilot spells its name out rather than taking a letter, since the
+initials it would want are contested.
 """
 
 from __future__ import annotations
@@ -51,8 +51,6 @@ class AgentMark:
 # `qwencode` is absent from that enum, so herdr never reports it -- but
 # `display_agent` accepts arbitrary strings, so a wrapper can self-report and
 # still land on a mark here. See Pane.mark_key.
-# Codex is `C` rather than a `>_`-style mark for the same reason TERMINAL is
-# `$_`: the two must stay visually distinct.
 MARKS: dict[str, AgentMark] = {
     # U+2733 eight-spoked asterisk, echoing Anthropic's starburst.
     "claude": AgentMark("✳", (217, 119, 87), 1.5),
@@ -60,8 +58,13 @@ MARKS: dict[str, AgentMark] = {
     # "pi prime" -- U+2032 PRIME, not an ASCII apostrophe, which sits too low
     # and reads as a typo at this size.
     "omp": AgentMark("π′", (196, 160, 255), 1.35),
-    "codex": AgentMark("C", (236, 236, 241), 1.4),
-    # Spelled out: Codex has the single C, and two agents cannot share it.
+    # Echoes the `>_` inside Codex's own cloud logo. A bare letter sat badly
+    # next to Claude's starburst -- one key read as a logo and the other as a
+    # placeholder. Sky blue, not the brand's black-on-white, which has no
+    # contrast to give on either theme.
+    "codex": AgentMark(">_", (96, 200, 240), 1.05),
+    # Spelled out rather than lettered: `C` reads as Codex to anyone who has
+    # seen the two side by side, and `Co` collides with Cursor's `Cu`.
     "copilot": AgentMark("copilot", (139, 148, 158), 0.62),
     "opencode": AgentMark("OC", (120, 200, 160), 1.0),
     "cursor": AgentMark("Cu", (200, 200, 210), 1.0),
@@ -81,8 +84,10 @@ TERMINAL = AgentMark("$_", (150, 152, 160), 1.05)
 Not an absence to be greyed out -- switching to a terminal is a normal thing
 to want from the deck, so it gets a real mark and stays legible.
 
-``$_`` rather than ``>_`` deliberately: Codex's own logo is a cloud containing
-``>_``, and a terminal key must not read as a Codex key.
+``$_`` because ``>_`` belongs to Codex, whose logo is a cloud containing it.
+The two are the only prompt-shaped marks, so they lean on the sigil and on
+colour to stay apart: a grey ``$`` against a sky-blue ``>``. Nothing else may
+take an ``X_`` form without breaking that.
 
 Replaces an earlier middle dot, which at 41px rendered as a small featureless
 square -- present in the font, but meaningless on the key."""

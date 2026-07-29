@@ -18,15 +18,28 @@ def test_requested_marks() -> None:
     assert mark_for("omp").glyph == "π′"  # pi prime
     assert mark_for("pi").glyph == "π"
     assert mark_for("opencode").glyph == "OC"
-    assert mark_for("codex").glyph == "C"
+    assert mark_for("codex").glyph == ">_"
     assert mark_for("copilot").glyph == "copilot"
     assert mark_for("claude").glyph == "✳"
 
 
-def test_codex_owns_the_bare_c() -> None:
-    """Copilot spells its name out precisely so Codex can keep 'C'."""
-    assert mark_for("codex").glyph == "C"
-    assert mark_for("copilot").glyph != "C"
+def test_codex_and_the_terminal_stay_apart() -> None:
+    """The only two prompt-shaped marks. They share a trailing underscore, so
+    the sigil and the colour are all that separate them -- and both must."""
+    codex = mark_for("codex")
+    assert codex.glyph == ">_"
+    assert TERMINAL.glyph == "$_"
+    assert codex.glyph[0] != TERMINAL.glyph[0]
+    assert codex.color != TERMINAL.color
+
+    difference = sum(abs(a - b) for a, b in zip(codex.color, TERMINAL.color, strict=True))
+    assert difference > 120, "too close in colour to tell apart at a glance"
+
+
+def test_no_other_mark_takes_a_prompt_shape() -> None:
+    """A third `X_` mark would break the pairing above."""
+    prompts = {name for name, mark in MARKS.items() if mark.glyph.endswith("_")}
+    assert prompts == {"codex"}
 
 
 def test_no_two_agents_share_a_mark() -> None:
@@ -84,9 +97,7 @@ def test_a_pane_with_no_agent_is_marked_as_a_terminal() -> None:
 
 
 def test_terminal_does_not_collide_with_any_agent() -> None:
-    """Codex's real logo is a cloud containing >_, hence $_ here."""
     assert TERMINAL.glyph not in {m.glyph for m in MARKS.values()}
-    assert TERMINAL.glyph != mark_for("codex").glyph
 
 
 def test_terminals_are_steady_targets() -> None:
