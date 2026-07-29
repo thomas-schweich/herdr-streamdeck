@@ -17,15 +17,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
-from .animation import LEVELS, scale_factor
+from .animation import LEVELS
 from .theme import DARK, Theme
 
 if TYPE_CHECKING:
-    from PIL import Image, ImageFont
+    from collections.abc import Iterator
+
+    from PIL import Image, ImageDraw, ImageFont
 
     # PIL returns different font classes depending on which loader worked.
     ImageFontLike: TypeAlias = ImageFont.FreeTypeFont | ImageFont.ImageFont
     ImageLike: TypeAlias = Image.Image
+    ImageDrawLike: TypeAlias = ImageDraw.ImageDraw
 
 logger = logging.getLogger(__name__)
 
@@ -67,32 +70,8 @@ def load_icon(path: Path, size: int) -> ImageLike | None:
     return icon
 
 
-@lru_cache(maxsize=LEVELS * 4)
-def _brightness_lut(level_index: int, levels: int, target: int = 0) -> tuple[int, ...]:
-    """256-entry lookup mapping source values to a dimmed level.
-
-    Dims *toward* ``target``: black on a dark theme, white on a light one.
-    Multiplying toward black on a white field would turn a quiet key muddy
-    grey and crush its dark mark into the background.
-
-    A LUT keeps dimming to one C-level ``Image.point`` pass rather than any
-    per-pixel Python.
-    """
-    factor = scale_factor(level_index / max(1, levels - 1))
-    return tuple(
-        min(255, max(0, round(target + (value - target) * factor))) for value in range(256)
-    )
-
-
 PressHandler = Callable[[int, bool], None]
 """Called with (key_index, pressed). ``pressed`` is False on release."""
-
-
-BACKGROUND: RGB = (38, 38, 42)
-"""Neutral grey field. The mark and the status strip carry the colour."""
-
-BADGE_FILL: RGB = (72, 72, 80)
-BADGE_TEXT: RGB = (236, 236, 241)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +82,9 @@ class ButtonFace:
     along the top edge, and the pane's name in a badge near the lower-right --
     offset from the corner rather than flush to it, echoing how Claude Code
     shows a session name inside its prompt box.
+
+    Everything here except ``background`` is drawn identically at every
+    luminance level. Only the field moves.
     """
 
     mark: str = ""
@@ -118,7 +100,9 @@ class ButtonFace:
     status_color: RGB | None = None
     """Thin strip along the top edge. None draws no strip."""
 
-    background: RGB = BACKGROUND
+    background: RGB = DARK.background
+    """The field at full brightness. Quieter levels interpolate down from it;
+    see Theme.field_at."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +166,7 @@ class ButtonSurface(Protocol):
     """A grid of labelled, pressable keys."""
 
     theme: Theme
-    """Colours, and which way brightness dims. See theme.Theme."""
+    """Field colours at both ends of the brightness range. See theme.Theme."""
 
     @property
     def key_count(self) -> int: ...
@@ -381,11 +365,12 @@ class StreamDeckSurface:
             deck.set_key_image(index, frames.at(level_index))
 
     def render(self, face: ButtonFace) -> KeyFrames:
-        """Compose the key once, then encode it at every luminance level.
+        """Encode the face at every luminance level.
 
-        The expensive half -- fonts, text, the badge -- runs once. Dimming is a
-        single ``Image.point`` pass through a cached LUT, and the JPEG encode
-        measured 0.03 ms, so the whole ladder costs about one extra render.
+        The expensive half -- fonts, text, the icon -- runs once inside
+        ``key_frames``; per level all that remains is a fill, an alpha paste
+        and a JPEG encode (measured 0.03 ms), so the whole ladder costs about
+        one extra render.
         """
         from StreamDeck.ImageHelpers import PILHelper
 
@@ -393,93 +378,113 @@ class StreamDeckSurface:
         if deck is None:
             raise RuntimeError("deck is not open")
 
-        base = self._compose(deck, face)
-        levels = self.levels
-        frames: list[bytes] = []
-        for level_index in range(levels):
-            if level_index == levels - 1:
-                dimmed = base
-            else:
-                lut = _brightness_lut(level_index, levels, self.theme.dim_target)
-                dimmed = base.point(list(lut) * len(base.getbands()))
-            frames.append(PILHelper.to_native_key_format(deck, dimmed))
-        return KeyFrames(face=face, frames=tuple(frames))
-
-    def _compose(self, deck: DeckDevice, face: ButtonFace) -> ImageLike:
-        """Draw a key at full brightness."""
-        from PIL import ImageDraw
-        from StreamDeck.ImageHelpers import PILHelper
-
-        source: ImageLike = PILHelper.create_key_image(deck, background=face.background)
-        draw = ImageDraw.Draw(source)
-        width, height = source.size
-
-        # Status along the top edge, so the neutral field stays neutral while
-        # agent state is still readable across the whole deck at a glance.
-        if face.status_color is not None:
-            draw.rectangle((0, 0, width, max(3, height // 18)), fill=face.status_color)
-
-        # A user-supplied icon replaces the glyph entirely; falling back to the
-        # glyph when it cannot be read keeps a broken PNG from blanking a key.
-        drew_icon = False
-        if face.icon is not None:
-            icon = load_icon(face.icon, int(height * 0.52))
-            if icon is not None:
-                origin = (
-                    (width - icon.width) // 2,
-                    int((height - icon.height) // 2 - height * 0.06),
-                )
-                source.paste(icon, origin, icon)
-                drew_icon = True
-
-        if face.mark and not drew_icon:
-            mark_font = load_font(max(9, int(height * 0.36 * face.mark_scale)))
-            draw.text(
-                (width / 2, height / 2 - height * 0.06),
-                face.mark,
-                font=mark_font,
-                anchor="mm",
-                fill=face.mark_color,
-            )
-
-        if face.badge:
-            self._draw_badge(draw, face.badge, width, height)
-
-        return source
-
-    def _draw_badge(self, draw: object, text: str, width: int, height: int) -> None:
-        """Name badge inset from the lower-right corner."""
-        from PIL import ImageDraw
-
-        assert isinstance(draw, ImageDraw.ImageDraw)
-        font = load_font(max(8, int(height * 0.15)))
-
-        # Trim to what actually fits rather than letting it run off the key.
-        margin = int(width * 0.07)
-        usable = width - 2 * margin - 6
-        label = text
-        while label and draw.textlength(label, font=font) > usable:
-            label = label[:-1]
-        if not label:
-            return
-        if label != text and len(label) > 1:
-            label = label[:-1] + "…"
-
-        text_width = draw.textlength(label, font=font)
-        pad_x, pad_y = 4, 2
-        right = width - margin
-        bottom = height - margin
-        left = right - text_width - 2 * pad_x
-        top = bottom - int(height * 0.15) - 2 * pad_y
-
-        draw.rounded_rectangle((left, top, right, bottom), radius=3, fill=self.theme.badge_fill)
-        draw.text(
-            ((left + right) / 2, (top + bottom) / 2),
-            label,
-            font=font,
-            anchor="mm",
-            fill=self.theme.badge_text,
+        size = PILHelper.create_key_image(deck).size
+        return KeyFrames(
+            face=face,
+            frames=tuple(
+                PILHelper.to_native_key_format(deck, image)
+                for image in key_frames(size, face, self.theme, self.levels)
+            ),
         )
+
+
+def key_frames(
+    size: tuple[int, int], face: ButtonFace, theme: Theme, levels: int
+) -> Iterator[ImageLike]:
+    """Every luminance frame for a face: one foreground over many fields.
+
+    This is the whole rendering pipeline, kept free of the device so it can be
+    exercised without hardware. The foreground is composed once and reused
+    unchanged, which is not just an optimisation -- it is the guarantee that
+    marks and badges are equally legible at every level.
+    """
+    from PIL import Image
+
+    overlay = compose_foreground(size, face, theme)
+    for index in range(levels):
+        field = theme.field_at(face.background, index / max(1, levels - 1))
+        image = Image.new("RGB", size, field)
+        image.paste(overlay, (0, 0), overlay)
+        yield image
+
+
+def compose_foreground(size: tuple[int, int], face: ButtonFace, theme: Theme) -> ImageLike:
+    """Everything drawn *over* the field, on a transparent layer.
+
+    RGBA rather than a flattened image so antialiased glyph edges blend against
+    whichever field they end up on -- a foreground baked against one background
+    would show a halo on the others.
+    """
+    from PIL import Image, ImageDraw
+
+    layer: ImageLike = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    width, height = size
+
+    # Status along the top edge, so the field itself stays neutral while agent
+    # state is still readable across the whole deck at a glance.
+    if face.status_color is not None:
+        draw.rectangle((0, 0, width, max(3, height // 18)), fill=face.status_color)
+
+    # A user-supplied icon replaces the glyph entirely; falling back to the
+    # glyph when it cannot be read keeps a broken PNG from blanking a key.
+    drew_icon = False
+    if face.icon is not None:
+        icon = load_icon(face.icon, int(height * 0.52))
+        if icon is not None:
+            origin = (
+                (width - icon.width) // 2,
+                int((height - icon.height) // 2 - height * 0.06),
+            )
+            layer.paste(icon, origin, icon)
+            drew_icon = True
+
+    if face.mark and not drew_icon:
+        mark_font = load_font(max(9, int(height * 0.36 * face.mark_scale)))
+        draw.text(
+            (width / 2, height / 2 - height * 0.06),
+            face.mark,
+            font=mark_font,
+            anchor="mm",
+            fill=face.mark_color,
+        )
+
+    if face.badge:
+        _draw_badge(draw, face.badge, width, height, theme)
+
+    return layer
+
+
+def _draw_badge(draw: ImageDrawLike, text: str, width: int, height: int, theme: Theme) -> None:
+    """Name badge inset from the lower-right corner."""
+    font = load_font(max(8, int(height * 0.15)))
+
+    # Trim to what actually fits rather than letting it run off the key.
+    margin = int(width * 0.07)
+    usable = width - 2 * margin - 6
+    label = text
+    while label and draw.textlength(label, font=font) > usable:
+        label = label[:-1]
+    if not label:
+        return
+    if label != text and len(label) > 1:
+        label = label[:-1] + "…"
+
+    text_width = draw.textlength(label, font=font)
+    pad_x, pad_y = 4, 2
+    right = width - margin
+    bottom = height - margin
+    left = right - text_width - 2 * pad_x
+    top = bottom - int(height * 0.15) - 2 * pad_y
+
+    draw.rounded_rectangle((left, top, right, bottom), radius=3, fill=theme.badge_fill)
+    draw.text(
+        ((left + right) / 2, (top + bottom) / 2),
+        label,
+        font=font,
+        anchor="mm",
+        fill=theme.badge_text,
+    )
 
 
 def open_surface(

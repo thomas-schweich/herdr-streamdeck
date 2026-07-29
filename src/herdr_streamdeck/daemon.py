@@ -655,8 +655,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=ThemeName.DARK.value,
         help=(
             "'dark' for a dim room, 'light' for a bright one. Light is not "
-            "merely inverted: it dims toward white instead of black, so quiet "
-            "keys fade into the field rather than going muddy. Default: dark"
+            "merely inverted: quiet keys go grey rather than black, since on a "
+            "white deck a black key is the loudest thing on it. Default: dark"
         ),
     )
     parser.add_argument(

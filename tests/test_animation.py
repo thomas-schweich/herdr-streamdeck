@@ -1,8 +1,13 @@
 """Animation tests.
 
-The load-bearing property is **synchronisation**: phase must derive from the
-shared clock alone, never from when a pane entered its state. Several of these
+The property these are built around is **synchronisation**: phase must derive
+from the shared clock alone, never from when a pane entered its state. Several
 exist to fail if someone reintroduces per-key phase.
+
+A level drives the field only -- marks and badges are never dimmed -- so these
+no longer defend a legibility floor. What they defend instead is that the four
+states stay distinguishable from each other. See test_render.py for the
+foreground half.
 """
 
 from __future__ import annotations
@@ -14,7 +19,6 @@ import pytest
 
 from herdr_streamdeck.animation import (
     GAMMA,
-    LEGIBLE_FLOOR,
     LEVELS,
     Animation,
     Waveform,
@@ -48,35 +52,51 @@ def test_each_status_gets_the_requested_behaviour() -> None:
     assert blocked.low < blocked.high, "blocked should swing, not sit"
 
 
-def test_everything_meant_to_be_read_stays_legible() -> None:
-    """Below the measured floor a mark cannot be read, so nothing readable
-    may sit there. LEGIBLE_FLOOR came from a ramp shown on the device."""
-    for status in ("idle", "working", "done", "blocked"):
-        animation = animation_for(status)
-        assert animation.low >= LEGIBLE_FLOOR, f"{status} dips below legibility"
-        assert animation.high >= LEGIBLE_FLOOR
+def test_the_states_use_the_whole_range() -> None:
+    """Only the field is dimmed, so there is no floor to stay above.
+
+    An earlier version had to keep every state legible as a *glyph*, which
+    squeezed all four into the top third of the scale. If someone reintroduces
+    a floor, this catches it.
+    """
+    lows = [animation_for(s).low for s in ("idle", "working", "done", "blocked")]
+    assert min(lows) == 0.0, "nothing reaches the bottom of the range"
+    assert max(animation_for(s).high for s in ("done", "blocked")) == 1.0
 
 
-def test_working_never_looks_dimmer_than_idle() -> None:
+def test_blocked_blinks_between_half_and_full() -> None:
+    """The originally requested behaviour, restorable now that the field --
+    rather than the mark -- is what dims."""
+    blocked = animation_for("blocked")
+    assert blocked.low == pytest.approx(0.5)
+    assert blocked.high == pytest.approx(1.0)
+
+
+def test_working_never_looks_quieter_than_idle() -> None:
     """Otherwise the bottom of each breath inverts the meaning."""
     assert animation_for("working").low >= animation_for("idle").high
 
 
-def test_blocked_swings_wider_than_working_pulses() -> None:
-    """Blocked needs to grab attention that a working pulse does not."""
-    working = animation_for("working")
-    blocked = animation_for("blocked")
-    assert (blocked.high - blocked.low) > (working.high - working.low)
+def test_blocked_is_the_only_hard_edge_on_the_deck() -> None:
+    """What makes blocked grab attention is the discontinuity, not the size of
+    its swing -- working actually travels further, just smoothly."""
+    step = 1 / 20
+    for animation, expected in ((BLOCKED, "abrupt"), (WORKING, "smooth")):
+        deltas = [
+            abs(animation.level_at((i + 1) * step) - animation.level_at(i * step))
+            for i in range(int(animation.period / step) + 1)
+        ]
+        jumped = max(deltas) >= (animation.high - animation.low)
+        assert jumped is (expected == "abrupt")
 
 
-def test_unknown_status_is_steady_but_still_legible() -> None:
-    """A pane with no detected agent is a terminal, and switching to a shell
-    is a normal thing to want -- so it stays readable rather than being
-    dimmed into an absence."""
+def test_unknown_status_is_steady_and_quiet() -> None:
+    """A pane with no detected agent is a terminal: idle by nature, since
+    there is no agent to be busy. Its mark still shows at full strength, so
+    a quiet field costs it nothing."""
     unknown = animation_for("nonsense")
     assert unknown.waveform is Waveform.STEADY
-    assert unknown.high >= LEGIBLE_FLOOR
-    assert unknown.high < 1.0, "still quieter than an agent that finished"
+    assert unknown.high == animation_for("idle").high
 
 
 def test_working_and_blocked_use_different_periods() -> None:

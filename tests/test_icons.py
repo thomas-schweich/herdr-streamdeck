@@ -106,11 +106,12 @@ def test_terminal_does_not_collide_with_any_agent() -> None:
     assert TERMINAL.glyph != mark_for("codex").glyph
 
 
-def test_terminals_stay_legible() -> None:
-    """They are actionable targets, so they must not be dimmed into absence."""
-    from herdr_streamdeck.animation import LEGIBLE_FLOOR, animation_for
+def test_terminals_are_steady_targets() -> None:
+    """They are actionable, so they must not flicker or animate -- their mark
+    is drawn at full strength regardless, so a quiet field is no loss."""
+    from herdr_streamdeck.animation import animation_for
 
-    assert animation_for("unknown").high >= LEGIBLE_FLOOR
+    assert not animation_for("unknown").animated
 
 
 def test_long_marks_are_scaled_down() -> None:
