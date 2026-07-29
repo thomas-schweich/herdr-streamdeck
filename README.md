@@ -34,11 +34,6 @@ frame, so a key tells you it is occupied whatever the agent is doing, and
 brightness is free to use its whole range instead of stopping where a dimmed
 glyph would stop being readable.
 
-Two themes, for two rooms: `--theme dark` (default) and `--theme light` for a
-bright office. Light is not an inversion — quiet keys go *grey*, not black,
-since on a white deck a black key is the loudest thing on it. Agent accents are
-darkened to keep contrast without losing their hue.
-
 Badge text comes from herdr's `terminal_title_stripped` — the pane title with
 the agent's own status glyph removed, since that duplicates the mark already
 drawn and would cost two of the eight characters.
@@ -128,14 +123,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 217 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 173 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 211 run anywhere, and pin the protocol quirks documented
+XDG default); the other 167 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

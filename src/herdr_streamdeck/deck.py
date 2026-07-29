@@ -17,8 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
-from .animation import LEVELS
-from .theme import DARK, Theme
+from .animation import LEVELS, blend_channel
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -112,6 +111,33 @@ PressHandler = Callable[[int, bool], None]
 """Called with (key_index, pressed). ``pressed`` is False on release."""
 
 
+BACKGROUND: RGB = (58, 58, 64)
+"""The field at full brightness -- what a `done` pane sits on."""
+
+FIELD_QUIET: RGB = (14, 14, 17)
+"""The field at the bottom of the range -- what an `idle` pane sits on."""
+
+EMPTY_BACKGROUND: RGB = (0, 0, 0)
+"""A key with no pane. Off, not merely dim, and never animated."""
+
+BADGE_FILL: RGB = (72, 72, 80)
+BADGE_TEXT: RGB = (236, 236, 241)
+
+
+def field_at(background: RGB, level: float) -> RGB:
+    """The field colour for a perceptual level in 0..1.
+
+    Interpolates from FIELD_QUIET up to ``background``, which is passed in
+    rather than read from the constant so an empty key can hold its own colour.
+    """
+    clamped = max(0.0, min(1.0, level))
+    return (
+        blend_channel(FIELD_QUIET[0], background[0], clamped),
+        blend_channel(FIELD_QUIET[1], background[1], clamped),
+        blend_channel(FIELD_QUIET[2], background[2], clamped),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ButtonFace:
     """What a single key should show.
@@ -138,9 +164,9 @@ class ButtonFace:
     status_color: RGB | None = None
     """Thin strip along the top edge. None draws no strip."""
 
-    background: RGB = DARK.background
+    background: RGB = BACKGROUND
     """The field at full brightness. Quieter levels interpolate down from it;
-    see Theme.field_at."""
+    see field_at."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,9 +229,6 @@ class DeckDevice(Protocol):
 class ButtonSurface(Protocol):
     """A grid of labelled, pressable keys."""
 
-    theme: Theme
-    """Field colours at both ends of the brightness range. See theme.Theme."""
-
     @property
     def key_count(self) -> int: ...
 
@@ -240,7 +263,6 @@ class NullSurface:
 
     key_count_: int = 15
     key_layout_: tuple[int, int] = (3, 5)
-    theme: Theme = DARK
     faces: dict[int, ButtonFace] = field(default_factory=dict)
     shown: dict[int, int] = field(default_factory=dict)
     """Key index -> last level index written. Lets tests assert animation."""
@@ -305,9 +327,7 @@ class StreamDeckSurface:
         *,
         serial: str | None = None,
         brightness: int = 60,
-        theme: Theme = DARK,
     ) -> None:
-        self.theme = theme
         self._serial = serial
         self._brightness = brightness
         self._deck: DeckDevice | None = None
@@ -421,14 +441,12 @@ class StreamDeckSurface:
             face=face,
             frames=tuple(
                 PILHelper.to_native_key_format(deck, image)
-                for image in key_frames(size, face, self.theme, self.levels)
+                for image in key_frames(size, face, self.levels)
             ),
         )
 
 
-def key_frames(
-    size: tuple[int, int], face: ButtonFace, theme: Theme, levels: int
-) -> Iterator[ImageLike]:
+def key_frames(size: tuple[int, int], face: ButtonFace, levels: int) -> Iterator[ImageLike]:
     """Every luminance frame for a face: one foreground over many fields.
 
     This is the whole rendering pipeline, kept free of the device so it can be
@@ -438,15 +456,15 @@ def key_frames(
     """
     from PIL import Image
 
-    overlay = compose_foreground(size, face, theme)
+    overlay = compose_foreground(size, face)
     for index in range(levels):
-        field = theme.field_at(face.background, index / max(1, levels - 1))
+        field = field_at(face.background, index / max(1, levels - 1))
         image = Image.new("RGB", size, field)
         image.paste(overlay, (0, 0), overlay)
         yield image
 
 
-def compose_foreground(size: tuple[int, int], face: ButtonFace, theme: Theme) -> ImageLike:
+def compose_foreground(size: tuple[int, int], face: ButtonFace) -> ImageLike:
     """Everything drawn *over* the field, on a transparent layer.
 
     RGBA rather than a flattened image so antialiased glyph edges blend against
@@ -489,12 +507,12 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace, theme: Theme) ->
         )
 
     if face.badge:
-        _draw_badge(draw, face.badge, width, height, theme)
+        _draw_badge(draw, face.badge, width, height)
 
     return layer
 
 
-def _draw_badge(draw: ImageDrawLike, text: str, width: int, height: int, theme: Theme) -> None:
+def _draw_badge(draw: ImageDrawLike, text: str, width: int, height: int) -> None:
     """Name badge inset from the lower-right corner."""
     font = load_font(max(8, int(height * 0.15)))
 
@@ -516,13 +534,13 @@ def _draw_badge(draw: ImageDrawLike, text: str, width: int, height: int, theme: 
     left = right - text_width - 2 * pad_x
     top = bottom - int(height * 0.15) - 2 * pad_y
 
-    draw.rounded_rectangle((left, top, right, bottom), radius=3, fill=theme.badge_fill)
+    draw.rounded_rectangle((left, top, right, bottom), radius=3, fill=BADGE_FILL)
     draw.text(
         ((left + right) / 2, (top + bottom) / 2),
         label,
         font=font,
         anchor="mm",
-        fill=theme.badge_text,
+        fill=BADGE_TEXT,
     )
 
 
@@ -530,9 +548,8 @@ def open_surface(
     *,
     use_device: bool = True,
     serial: str | None = None,
-    theme: Theme = DARK,
 ) -> ButtonSurface:
     """Return a real deck when asked for one, otherwise an in-memory surface."""
     if not use_device:
-        return NullSurface(theme=theme)
-    return StreamDeckSurface(serial=serial, theme=theme)
+        return NullSurface()
+    return StreamDeckSurface(serial=serial)

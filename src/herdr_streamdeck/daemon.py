@@ -39,11 +39,10 @@ from typing import Protocol
 
 from .animation import EMPTY_ANIMATION, Animation, animation_for, frame_index
 from .client import HerdrSession
-from .deck import RGB, ButtonFace, ButtonSurface, KeyFrames, open_surface
+from .deck import EMPTY_BACKGROUND, RGB, ButtonFace, ButtonSurface, KeyFrames, open_surface
 from .icons import mark_for, resolve_override
 from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
 from .protocol import Event, HerdrError, JSONObject, subscription
-from .theme import ThemeName, theme_for
 
 logger = logging.getLogger("herdr_streamdeck")
 
@@ -181,18 +180,16 @@ class DeckController:
     def face_for(self, pane: Pane | None) -> ButtonFace:
         """The face for one key."""
         if pane is None:
-            return ButtonFace(background=self._surface.theme.empty_background)
-        theme = self._surface.theme
+            return ButtonFace(background=EMPTY_BACKGROUND)
         mark = mark_for(pane.mark_key)
         return ButtonFace(
             mark=mark.glyph,
-            mark_color=theme.mark_color(mark.color),
+            mark_color=mark.color,
             mark_scale=mark.scale,
             # A user PNG in the plugin config dir replaces the glyph.
             icon=resolve_override(pane.mark_key),
             badge=pane.badge,
             status_color=STATUS_COLORS.get(pane.status),
-            background=theme.background,
         )
 
     def repaint(self) -> None:
@@ -597,7 +594,6 @@ async def amain(argv: list[str] | None = None) -> int:
     surface = open_surface(
         use_device=not args.no_device,
         serial=args.serial,
-        theme=theme_for(args.theme),
     )
     surface.open()
 
@@ -647,16 +643,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "what a column represents: 'workspace' (sidebar order) or 'tab' "
             "(tabs of the focused workspace). Default: workspace"
-        ),
-    )
-    parser.add_argument(
-        "--theme",
-        choices=[t.value for t in ThemeName],
-        default=ThemeName.DARK.value,
-        help=(
-            "'dark' for a dim room, 'light' for a bright one. Light is not "
-            "merely inverted: quiet keys go grey rather than black, since on a "
-            "white deck a black key is the loudest thing on it. Default: dark"
         ),
     )
     parser.add_argument(

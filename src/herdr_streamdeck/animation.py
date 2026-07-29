@@ -9,7 +9,7 @@ done         full brightness
 blocked      blink between half and full
 ===========  ===========================================================
 
-A level here drives the **field only** -- see :mod:`.theme`. Marks and badges
+A level here drives the **field only** -- see :func:`.deck.field_at`. Marks and badges
 are drawn at full strength in every frame, so nothing that has to be read rides
 on these numbers and they are free to use the whole range. An earlier version
 dimmed the entire key, which forced a measured floor (0.66) below which a glyph
@@ -143,7 +143,7 @@ def blend_channel(quiet: int, full: int, level: float) -> int:
     equal level steps look equally spaced.
 
     Reduces exactly to ``full * scale_factor(level)`` when ``quiet`` is black,
-    which is the case the dark theme is very nearly in.
+    which is very nearly the case for the field's quiet end.
     """
     clamped = max(0.0, min(1.0, level))
     low = float((quiet / 255) ** (1 / GAMMA))

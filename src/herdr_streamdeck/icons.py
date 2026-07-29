@@ -65,8 +65,8 @@ MARKS: dict[str, AgentMark] = {
     # a monospace face `_` is a full-em bar, so the underscore *is* the width
     # and no amount of tracking recovers it. U+276F is one glyph, so it sizes
     # like the others -- 1.2 puts its ink at 13x24/119px beside Claude's
-    # 22x23/117. Sky blue, not the brand's black-on-white, which has no
-    # contrast to give on either theme.
+    # 22x23/119. Sky blue, not the brand's black-on-white, which has no
+    # contrast to give against a dark field.
     "codex": AgentMark("❯", (96, 200, 240), 1.2),
     # Spelled out rather than lettered: `C` reads as Codex to anyone who has
     # seen the two side by side, and `Co` collides with Cursor's `Cu`.
