@@ -877,7 +877,13 @@ async def test_the_preview_shows_the_selected_reply_verbatim() -> None:
     controller, surface, _ = await menued()
     await open_menu(controller, surface)
 
-    shown = "".join(surface.faces[k].summary for k in (1, 2, 3, 6, 7, 8, 11, 12, 13))
+    rows = [(1, 2, 3), (6, 7, 8), (11, 12, 13)]
+    lines = []
+    for row in rows:
+        cells = [surface.faces[k].summary.split("\n") for k in row]
+        for slot in range(2):
+            lines.append("".join(c[slot] if slot < len(c) else "" for c in cells))
+    shown = " ".join(" ".join(lines).split())
     assert shown == SUMMARY.replies[0].text, "the exact text, not the label"
 
 

@@ -64,10 +64,12 @@ filling the nine keys between. The selected suggestion is outlined; press
 another to change it. Nothing is sent until `Send`, and the menu stays until you
 choose or go back.
 
-The preview is justified across those keys, with a margin of exactly one
-character on the outside and none at all on the interior seams — so the first
-column's text ends flush at its right edge and the last begins flush at its
-left, leaving the bezel as the only gap. The two pressable columns are lit and
+The preview is justified across those keys. The margins are literal spaces at
+each end of the line rather than a drawing inset, so every key draws from its
+own left edge and the interior seams carry nothing but bezel. A line that stops
+mid-word gets a hyphen in its right-hand margin. Line positions are fixed, so a
+key carrying one line puts it exactly where its two-line neighbours put their
+first. The two pressable columns are lit and
 the preview is near-black, so the block between them reads as a display rather
 than as nine more buttons. Lines break at spaces where they can and are then
 cut at column boundaries by character count, which is what makes the block read
@@ -175,14 +177,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 292 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 294 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 286 run anywhere, and pin the protocol quirks documented
+XDG default); the other 288 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

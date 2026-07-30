@@ -188,13 +188,6 @@ class ButtonFace:
     border: RGB | None = None
     """Outline around the whole key. Marks the selected reply in the menu."""
 
-    summary_inset: float = 0.0
-    """Left inset for fixed-size text, as a fraction of key width.
-
-    Only the outer columns of a preview take one; the interior ones sit flush
-    so a word broken across two keys is separated by the bezel and nothing
-    more."""
-
     summary_size: int = 0
     """Force a type size for ``summary``, and centre it in the whole key.
 
@@ -641,7 +634,7 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace) -> ImageLike:
             )
 
     if summarised:
-        _draw_summary(draw, face.summary, width, height, face.summary_size, face.summary_inset)
+        _draw_summary(draw, face.summary, width, height, face.summary_size)
     # The nameplate stays up alongside a summary. Fading the mark to a
     # watermark freed the middle of the key, and knowing *which* pane is asking
     # matters as much as what it asked.
@@ -764,15 +757,21 @@ below the best fit buys that alignment for at most a couple of points of size.
 """
 
 
-def _wrap_chars(body: str, per_line: int, max_lines: int) -> list[str] | None:
+def _wrap_chars(
+    body: str, per_line: int, max_lines: int
+) -> tuple[list[str], list[bool]] | None:
     """Break into lines of at most ``per_line`` characters, at spaces if it can.
 
     Word boundaries are best effort: a word longer than a whole line is split,
     because the alternative is dropping it. Everything else breaks cleanly.
+
+    Returns the lines and, for each, whether it *ends* mid-word -- which is what
+    earns it a hyphen in its right-hand margin.
     """
     if per_line < 1:
         return None
     lines: list[str] = []
+    broken: list[bool] = []
     current = ""
     for word in body.split():
         candidate = f"{current} {word}".strip()
@@ -781,45 +780,47 @@ def _wrap_chars(body: str, per_line: int, max_lines: int) -> list[str] | None:
             continue
         if current:
             lines.append(current)
+            broken.append(False)
             current = ""
         while len(word) > per_line:
             lines.append(word[:per_line])
+            broken.append(True)  # the rest of this word carries on below
             word = word[per_line:]
         current = word
     if current:
         lines.append(current)
-    return lines if len(lines) <= max_lines else None
+        broken.append(False)
+    return (lines, broken) if len(lines) <= max_lines else None
 
 
-def _capacities(columns: int, per_key: int) -> list[int]:
-    """Characters each column holds.
+def _line_capacity(columns: int, per_key: int) -> int:
+    """Characters of *text* a row holds, once the margins are accounted for.
 
-    The outer margin is exactly one character wide, so the edge columns hold one
-    fewer than the rest. That is what puts the text flush against the interior
-    seams: the first column's line ends at the key's right edge and the last
-    column's begins at its left, leaving the bezel as the only gap.
+    The margin is a literal space at each end of the line rather than a drawing
+    inset. Every key then holds exactly ``per_key`` characters starting at its
+    own left edge, which is what makes the interior seams carry nothing but
+    bezel -- and it is arithmetic rather than geometry, so there is no rounding
+    left over to push the text away from an edge.
     """
-    if columns == 1:
-        return [max(0, per_key - 2)]
-    edge = max(0, per_key - 1)
-    return [edge, *([per_key] * (columns - 2)), edge]
+    return max(0, per_key * columns - 2)
 
 
 def plan_preview(
     text: str, rows: int, columns: int, size: tuple[int, int]
-) -> tuple[list[tuple[str, float]], int]:
+) -> tuple[list[str], int]:
     """Justify `text` across a rows x columns block of keys.
 
-    Returns, for each key in reading order, the text it shows (newline
-    separated when a row carries more than one line) and the fraction of key
-    width to inset it by -- and the type size they all share.
+    Returns the text each key shows, in reading order -- newline separated, one
+    entry per line slot, always ``PREVIEW_LINES_PER_ROW`` of them so a key with
+    one line puts it in the same place as a key with two -- and the type size
+    they all share.
 
     Lines break at spaces where they can, but a line spans the whole row and is
     then cut at column boundaries by character count. That is what makes the row
-    read as continuous text rather than as separate captions, and with the
-    margin set to exactly one character the interior seams carry no slack at
-    all: a word broken across two keys is interrupted by the bezel and nothing
-    else.
+    read as continuous text rather than as separate captions. The margins are
+    literal spaces at the ends of each line, so every key draws from its own
+    left edge and the interior seams carry nothing but bezel. A line that begins
+    mid-word gets a hyphen in that margin instead of a space.
     """
     from PIL import Image, ImageDraw
 
@@ -829,11 +830,12 @@ def plan_preview(
     draw = ImageDraw.Draw(Image.new("RGB", size))
     width = float(size[0])
     body = " ".join(text.split())
-    blank: list[tuple[str, float]] = [("", 0.0) for _ in range(rows) for _ in range(columns)]
+    slots = PREVIEW_LINES_PER_ROW
+    blank = ["\n" * (slots - 1)] * (rows * columns)
     if not body:
         return blank, MIN_MARK_SIZE
 
-    fits: list[tuple[float, int, list[int], list[str], float]] = []
+    fits: list[tuple[float, int, int, list[str], list[bool]]] = []
     for point in range(PREVIEW_CAP, MIN_MARK_SIZE - 1, -1):
         advance = draw.textlength("M", font=load_font(point))
         if advance <= 0:
@@ -841,49 +843,62 @@ def plan_preview(
         per_key = int(width // advance)
         if per_key < 3:
             continue
-        caps = _capacities(columns, per_key)
-        lines = _wrap_chars(body, sum(caps), rows * PREVIEW_LINES_PER_ROW)
-        if lines is None:
+        wrapped = _wrap_chars(body, _line_capacity(columns, per_key), rows * slots)
+        if wrapped is None:
             continue
-        slack = width - per_key * advance
-        fits.append((slack, point, caps, lines, advance))
+        lines, broken = wrapped
+        fits.append((width - per_key * advance, point, per_key, lines, broken))
         if len(fits) >= FLUSH_WINDOW:
             break
 
     if fits:
         # Flushest first, and the largest size among equals.
-        slack, point, caps, lines, advance = min(fits, key=lambda f: (f[0], -f[1]))
-        return _place(lines, caps, rows, columns, advance / width), point
+        _, point, per_key, lines, broken = min(fits, key=lambda f: (f[0], -f[1]))
+        return _place(lines, broken, per_key, rows, columns), point
 
     # Too long for the block even at the smallest size: show the start of it.
     advance = max(draw.textlength("M", font=load_font(MIN_MARK_SIZE)), 1.0)
-    caps = _capacities(columns, max(3, int(width // advance)))
-    per_line = max(1, sum(caps))
-    total = rows * PREVIEW_LINES_PER_ROW
+    per_key = max(3, int(width // advance))
+    per_line = max(1, _line_capacity(columns, per_key))
+    total = rows * slots
     clipped = body[: per_line * total]
     clipped = clipped[:-1] + "\u2026" if len(clipped) > 1 else "\u2026"
     lines = [clipped[i : i + per_line] for i in range(0, len(clipped), per_line)][:total]
-    return _place(lines, caps, rows, columns, advance / width), MIN_MARK_SIZE
+    return _place(lines, [False] * len(lines), per_key, rows, columns), MIN_MARK_SIZE
 
 
 def _place(
-    lines: list[str], caps: list[int], rows: int, columns: int, inset: float
-) -> list[tuple[str, float]]:
-    """Cut each line at column boundaries and stack them onto their row."""
-    per_row = PREVIEW_LINES_PER_ROW
-    placed: list[tuple[str, float]] = []
+    lines: list[str],
+    broken: list[bool],
+    per_key: int,
+    rows: int,
+    columns: int,
+) -> list[str]:
+    """Cut each line at column boundaries and stack them onto their row.
+
+    Every key gets exactly ``PREVIEW_LINES_PER_ROW`` slots, blank ones included,
+    so a line always sits at the same height whether or not its neighbours have
+    a second line. Centring a lone line instead put it halfway between the two
+    rows of text either side of it.
+    """
+    slots = PREVIEW_LINES_PER_ROW
+    placed: list[str] = []
     for row in range(rows):
         stacked: list[list[str]] = [[] for _ in range(columns)]
-        for slot in range(per_row):
-            index = row * per_row + slot
-            line = lines[index] if index < len(lines) else ""
-            offset = 0
-            for column, cap in enumerate(caps):
-                stacked[column].append(line[offset : offset + cap])
-                offset += cap
+        for slot in range(slots):
+            index = row * slots + slot
+            if index < len(lines):
+                # A leading space for the left margin, and the right-hand one
+                # filled with a hyphen when the line stops mid-word.
+                span = per_key * columns
+                body = " " + lines[index]
+                padded = body.ljust(span - 1) + ("-" if broken[index] else " ")
+            else:
+                padded = ""
+            for column in range(columns):
+                stacked[column].append(padded[column * per_key : (column + 1) * per_key])
         for column in range(columns):
-            text = "\n".join(stacked[column]).rstrip("\n")
-            placed.append((text, inset if column == 0 else 0.0))
+            placed.append("\n".join(stacked[column]))
     return placed
 
 
@@ -893,7 +908,6 @@ def _draw_summary(
     width: int,
     height: int,
     fixed: int = 0,
-    inset: float = 0.0,
 ) -> None:
     """A short phrase, wrapped and centred in the middle of the key.
 
@@ -906,46 +920,54 @@ def _draw_summary(
     form gave `remove endpoint deprecation?`, which parses as a question about
     un-deprecating something.
     """
+    if fixed:
+        _draw_cell(draw, text, height, fixed)
+        return
+
     # Bounded above by the status dot and below by the nameplate, both of
     # which stay visible.
-    lines: list[str]
-    if fixed:
-        # A cell in a multi-key line: no dot or nameplate to leave room for, so
-        # it uses the whole key and the caller's size.
-        top, available = 0.0, float(height)
-        font = load_font(fixed)
-        size = fixed
-        lines = text.split("\n")
-    else:
-        top = height * 0.22
-        available = height * 0.72 - top
-        fitted, size, font = _fit_summary(draw, text, width, available)
-        if fitted is None:
-            return
-        lines = fitted
+    top = height * 0.22
+    available = height * 0.72 - top
+    lines, size, font = _fit_summary(draw, text, width, available)
+    if lines is None:
+        return
 
     step = size * SUMMARY_LEADING
     start = top + (available - len(lines) * step) / 2
     for index, line in enumerate(lines):
-        if fixed:
-            # Left-aligned at a fixed inset so the character columns line up
-            # from key to key; centring would ragged-edge every short chunk and
-            # break the illusion of one screen.
-            draw.text(
-                (width * inset, start + step * (index + 0.5)),
-                line,
-                font=font,
-                anchor="lm",
-                fill=SUMMARY_COLOR,
-            )
-        else:
-            draw.text(
-                (width / 2, start + step * (index + 0.5)),
-                line,
-                font=font,
-                anchor="mm",
-                fill=SUMMARY_COLOR,
-            )
+        draw.text(
+            (width / 2, start + step * (index + 0.5)),
+            line,
+            font=font,
+            anchor="mm",
+            fill=SUMMARY_COLOR,
+        )
+
+
+def _draw_cell(draw: ImageDrawLike, text: str, height: int, point: int) -> None:
+    """One key of a multi-key block of text.
+
+    Always lays out ``PREVIEW_LINES_PER_ROW`` slots, blank ones included, so a
+    key carrying one line puts it exactly where its two-line neighbours put
+    their first. Centring a lone line instead dropped it halfway between the
+    two rows of text either side of it, which read as a typo.
+
+    Drawn from x=0: the margin is a literal space in the text, not an inset, so
+    the character columns line up from key to key by construction.
+    """
+    font = load_font(point)
+    step = point * SUMMARY_LEADING
+    start = (height - PREVIEW_LINES_PER_ROW * step) / 2
+    for index, line in enumerate(text.split("\n")[:PREVIEW_LINES_PER_ROW]):
+        if not line.strip():
+            continue
+        draw.text(
+            (0, start + step * (index + 0.5)),
+            line,
+            font=font,
+            anchor="lm",
+            fill=SUMMARY_COLOR,
+        )
 
 
 def _fit_summary(

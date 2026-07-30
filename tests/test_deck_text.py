@@ -7,7 +7,6 @@ by the bezel and nothing else, and every key uses one type size.
 
 from __future__ import annotations
 
-import pytest
 from PIL import Image, ImageDraw
 
 from herdr_streamdeck.deck import (
@@ -20,14 +19,14 @@ SIZE = (72, 72)
 TEXT = "Remove the legacy /v1/login endpoint now that nothing references it anywhere."
 
 
-def rows_of(cells: list[tuple[str, float]], rows: int, columns: int) -> list[list[str]]:
+def rows_of(cells: list[str], rows: int, columns: int) -> list[list[str]]:
     """Reassemble each visual line from the cells that carry it."""
     lines: list[list[str]] = []
     for row in range(rows):
         row_cells = cells[row * columns : (row + 1) * columns]
         for slot in range(PREVIEW_LINES_PER_ROW):
             parts = []
-            for text, _ in row_cells:
+            for text in row_cells:
                 split = text.split("\n")
                 parts.append(split[slot] if slot < len(split) else "")
             lines.append(parts)
@@ -42,22 +41,33 @@ def test_the_text_survives_the_journey_intact() -> None:
     assert " ".join(joined.split()) == TEXT
 
 
-def test_only_the_first_column_is_inset() -> None:
-    """Interior seams carry no margin, so a word broken across two keys is
-    separated by the bezel and nothing more."""
+def test_the_margin_is_a_literal_space_at_each_end() -> None:
+    """Arithmetic rather than geometry: every key draws from its own left edge
+    and holds the same number of characters, so nothing is left over to push
+    text away from an interior seam."""
     cells, _ = plan_preview(TEXT, 3, 3, SIZE)
-    first, middle, last = (inset for _, inset in cells[:3])
-    assert first > 0
-    assert middle == 0.0 and last == 0.0
+    lines = rows_of(cells, 3, 3)
+    assert lines[0][0].startswith(" "), "left margin"
+    assert "".join(lines[0]).endswith(" "), "right margin"
 
 
-def test_the_margin_is_exactly_one_character_wide() -> None:
-    """Which is what puts the text flush against the interior seams: the first
-    column ends at its right edge, the last begins at its left."""
-    cells, point = plan_preview(TEXT, 3, 3, SIZE)
-    draw = ImageDraw.Draw(Image.new("RGB", SIZE))
-    advance = draw.textlength("M", font=load_font(point))
-    assert cells[0][1] * SIZE[0] == pytest.approx(advance, abs=0.5)
+def test_every_key_carries_the_same_number_of_line_slots() -> None:
+    """So a key with one line puts it where its neighbours put their first,
+    rather than centring it between the two."""
+    cells, _ = plan_preview("alpha beta", 3, 3, SIZE)
+    assert {len(text.split("\n")) for text in cells} == {PREVIEW_LINES_PER_ROW}
+
+
+def test_a_word_broken_across_lines_is_hyphenated() -> None:
+    cells, _ = plan_preview("supercalifragilisticexpialidocious" * 2, 3, 3, SIZE)
+    lines = ["".join(parts) for parts in rows_of(cells, 3, 3)]
+    assert lines[0].rstrip().endswith("-"), lines[0]
+
+
+def test_a_clean_break_is_not_hyphenated() -> None:
+    cells, _ = plan_preview("alpha beta gamma delta epsilon zeta eta theta", 3, 3, SIZE)
+    for line in ("".join(parts) for parts in rows_of(cells, 3, 3)):
+        assert not line.rstrip().endswith("-"), line
 
 
 def test_the_size_chosen_leaves_the_columns_nearly_flush() -> None:
@@ -74,7 +84,7 @@ def test_the_size_chosen_leaves_the_columns_nearly_flush() -> None:
 def test_two_lines_fit_on_each_row() -> None:
     """One line wasted most of a 72px key."""
     cells, _ = plan_preview(TEXT, 3, 3, SIZE)
-    assert any(len(text.split("\n")) == 2 for text, _ in cells)
+    assert any(all(part.strip() for part in text.split("\n")) for text in cells)
 
 
 def test_lines_break_at_words_when_they_can() -> None:
@@ -94,7 +104,7 @@ def test_a_short_reply_gets_a_big_size() -> None:
     assert large > small
 
 
-def reading_order(cells: list[tuple[str, float]], rows: int, columns: int) -> str:
+def reading_order(cells: list[str], rows: int, columns: int) -> str:
     """Everything shown, in the order a human reads it.
 
     Not the order the cells come in: a cell holds both of its row's lines, so
@@ -106,7 +116,10 @@ def reading_order(cells: list[tuple[str, float]], rows: int, columns: int) -> st
 def test_a_word_longer_than_a_line_is_split_rather_than_dropped() -> None:
     monster = "supercalifragilisticexpialidocious" * 3
     cells, _ = plan_preview(monster, 3, 3, SIZE)
-    assert reading_order(cells, 3, 3).startswith("supercalifragilistic")
+    shown = reading_order(cells, 3, 3)
+    assert shown.lstrip().startswith("supercalifragilisti-"), shown
+    # Every fragment survives, hyphens and margins aside.
+    assert shown.replace("-", "").replace(" ", "") == monster
 
 
 def test_text_too_long_for_the_block_is_marked_as_clipped() -> None:
@@ -116,7 +129,7 @@ def test_text_too_long_for_the_block_is_marked_as_clipped() -> None:
 
 def test_an_empty_reply_leaves_the_block_blank() -> None:
     cells, _ = plan_preview("", 3, 3, SIZE)
-    assert all(text == "" for text, _ in cells)
+    assert all(not text.strip() for text in cells)
     assert len(cells) == 9
 
 
