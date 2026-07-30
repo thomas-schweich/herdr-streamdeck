@@ -172,6 +172,25 @@ window to see the error:
 
 ## Running the daemon
 
+```bash
+uv run herdr-streamdeck            # start, or replace a running one
+uv run herdr-streamdeck --stop     # stop it
+```
+
+Running it a second time takes the deck over from the first: the newcomer holds
+an `flock` on `$XDG_RUNTIME_DIR/herdr-streamdeck.lock` (the temp dir on macOS),
+SIGTERMs whoever is recorded there, waits for the lock to come free, and
+escalates to SIGKILL if the old process ignores it.
+
+The lock is an OS primitive rather than a protocol on purpose: it has to work
+between two versions that know nothing about each other, and the kernel releases
+it however the holder exits, so a crash leaves nothing to clean up. The file
+format is one decimal PID on the first line and that is the whole contract —
+anything after it is commentary a reader may ignore.
+
+`--serial` keys the lock per device, so two decks can be driven by two daemons
+without either displacing the other.
+
 > **Run the daemon, not a script.** Keys only become live when
 > `DeckController.run()` installs the press handler. Driving `prime()`/`tick()`
 > directly from a script gives a correct-looking display with dead keys, which

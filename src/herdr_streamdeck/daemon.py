@@ -49,6 +49,7 @@ from .deck import (
     open_surface,
 )
 from .icons import mark_for, resolve_override
+from .instance import AlreadyRunning, SingleInstance, lock_path, stop_running
 from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
 from .protocol import Event, HerdrError, JSONObject, subscription
 from .summary import PaneSummary, Reply, Summariser
@@ -909,6 +910,20 @@ async def amain(argv: list[str] | None = None) -> int:
     if args.probe:
         return probe_devices()
 
+    if args.stop:
+        stopped = stop_running(args.serial)
+        print(f"stopped pid {stopped}" if stopped else "no daemon was running")
+        return 0
+
+    instance = SingleInstance(lock_path(args.serial))
+    try:
+        displaced = instance.acquire(takeover=not args.no_takeover)
+    except AlreadyRunning as exc:
+        logger.error("%s", exc)
+        return 1
+    if displaced is not None:
+        logger.info("took the deck over from pid %d", displaced)
+
     surface = open_surface(
         use_device=not args.no_device,
         serial=args.serial,
@@ -920,7 +935,12 @@ async def amain(argv: list[str] | None = None) -> int:
     summariser = None if args.no_summaries else build_summariser(max_replies=rows)
     if summariser is None and not args.no_summaries:
         logger.info("no FIREWORKS_API_KEY found; running without pane summaries")
-    surface.open()
+
+    try:
+        surface.open()
+    except Exception:
+        instance.release()
+        raise
 
     # Two connections -- herdr resets a connection that both subscribes and
     # issues requests. See HerdrSession.
@@ -948,6 +968,7 @@ async def amain(argv: list[str] | None = None) -> int:
             await runner
         await client.close()
         surface.close()
+        instance.release()
 
     if client.dropped_events:
         logger.warning("dropped %d events while repainting", client.dropped_events)
@@ -979,6 +1000,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "skip the three-word pane summaries even if a key is configured. "
             "They are already skipped when FIREWORKS_API_KEY is absent"
         ),
+    )
+    parser.add_argument(
+        "--no-takeover",
+        action="store_true",
+        help=(
+            "fail instead of replacing a daemon that is already running. "
+            "By default a second invocation takes the deck over, so restarting "
+            "is just running the command again"
+        ),
+    )
+    parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="stop a running daemon and exit",
     )
     parser.add_argument(
         "--probe",

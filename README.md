@@ -110,30 +110,32 @@ Working end to end on a Stream Deck MK.2 (15 keys): panes render with
 status colours, and pressing a key focuses that pane in herdr. Verified against
 real hardware and a live herdr server.
 
-## Install
-
-As a herdr plugin, once published:
-
-```bash
-herdr plugin install <owner>/herdr-streamdeck
-```
-
-For local development:
+## Install and run
 
 ```bash
 git clone <this repo> && cd herdr-streamdeck
 uv sync
-herdr plugin link .
+uv run herdr-streamdeck                  # with a device
+uv run herdr-streamdeck --no-device -v   # no hardware required
 ```
 
-`[[startup]]` commands run **only when a herdr server starts** — not on
-`plugin link`, `plugin enable`, or `server reload-config` (all verified). So
-during development, run the daemon by hand:
+**Run it again to restart it.** A second invocation asks the running daemon to
+hand the deck over, waits for it to let go, and takes its place — typically in
+about 100ms. There is no stop-then-start dance, and no stale lock to clear if
+one ever crashes.
 
 ```bash
-uv run herdr-streamdeck --no-device -v               # no hardware required
-uv run herdr-streamdeck                              # with a device
+uv run herdr-streamdeck --stop           # stop it without starting one
+uv run herdr-streamdeck --no-takeover    # fail instead of replacing
 ```
+
+That takeover is the reason this is a standalone daemon rather than a herdr
+plugin. herdr runs `[[startup]]` commands **only when the server starts**, so
+installing or updating a plugin means restarting herdr — and herdr exists to
+babysit long-running agents, which makes a convenient moment to restart it rare.
+A daemon you can replace mid-flight has no such problem.
+
+The `herdr-plugin.toml` manifest still works if you want it, with that caveat.
 
 ## Host setup
 
@@ -157,14 +159,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 269 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 281 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 263 run anywhere, and pin the protocol quirks documented
+XDG default); the other 275 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),
