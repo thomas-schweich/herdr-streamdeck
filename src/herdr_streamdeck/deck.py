@@ -9,6 +9,7 @@ and most of the development loop work.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from collections.abc import Callable
@@ -109,6 +110,16 @@ def load_icon(path: Path, size: int) -> ImageLike | None:
 
 PressHandler = Callable[[int, bool], None]
 """Called with (key_index, pressed). ``pressed`` is False on release."""
+
+
+class DeckDisconnected(RuntimeError):
+    """The device stopped answering.
+
+    A distinct type so the daemon can tell "unplugged" from "bug". Every write
+    goes to USB and a deck that has been pulled fails all fifteen of them,
+    twenty times a second -- treating that as an ordinary error produced 300
+    stack traces per second in the log.
+    """
 
 
 BACKGROUND: RGB = (58, 58, 64)
@@ -262,6 +273,13 @@ class ButtonSurface(Protocol):
 
     def set_press_handler(self, handler: PressHandler | None) -> None: ...
 
+    @property
+    def connected(self) -> bool: ...
+
+    def reopen(self) -> bool:
+        """Try to reacquire the device. False if it is still absent."""
+        ...
+
 
 @dataclass
 class NullSurface:
@@ -294,6 +312,14 @@ class NullSurface:
 
     def close(self) -> None:
         self.opened = False
+
+    @property
+    def connected(self) -> bool:
+        return True
+
+    def reopen(self) -> bool:
+        self.opened = True
+        return True
 
     @property
     def levels(self) -> int:
@@ -415,6 +441,30 @@ class StreamDeckSurface:
             finally:
                 self._deck = None
 
+    @property
+    def connected(self) -> bool:
+        return self._deck is not None
+
+    def _drop(self) -> None:
+        """Let go of a device that is no longer answering.
+
+        Deliberately does not reset() first: the deck is gone, so talking to it
+        again just raises a second time.
+        """
+        deck, self._deck = self._deck, None
+        if deck is not None:
+            with contextlib.suppress(Exception):
+                deck.close()
+
+    def reopen(self) -> bool:
+        """Try to reacquire the device. False while it is still absent."""
+        self._drop()
+        try:
+            self.open()
+        except Exception:
+            return False
+        return True
+
     def set_press_handler(self, handler: PressHandler | None) -> None:
         self._handler = handler
 
@@ -437,9 +487,16 @@ class StreamDeckSurface:
     def write(self, index: int, frames: KeyFrames, level_index: int) -> None:
         deck = self._deck
         if deck is None:
-            raise RuntimeError("deck is not open")
+            raise DeckDisconnected("deck is not open")
         with self._lock:
-            deck.set_key_image(index, frames.at(level_index))
+            try:
+                deck.set_key_image(index, frames.at(level_index))
+            except Exception as exc:
+                # Any transport failure means the device is gone as far as we
+                # are concerned. If it was transient the reconnect loop picks it
+                # straight back up, which is cheaper than guessing here.
+                self._drop()
+                raise DeckDisconnected(str(exc)) from exc
 
     def render(self, face: ButtonFace) -> KeyFrames:
         """Encode the face at every luminance level.
@@ -453,7 +510,7 @@ class StreamDeckSurface:
 
         deck = self._deck
         if deck is None:
-            raise RuntimeError("deck is not open")
+            raise DeckDisconnected("deck is not open")
 
         size = PILHelper.create_key_image(deck).size
         return KeyFrames(

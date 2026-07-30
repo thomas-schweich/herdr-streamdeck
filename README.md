@@ -98,6 +98,12 @@ because it is the only redistributable mono font checked that has U+2733, the
 asterisk standing in for Claude's starburst. Marks are then measured and shrunk
 to fit, so a long one like `copilot` cannot overrun its key.
 
+Unplugging the deck logs `deck disconnected` once, not once per key per frame,
+and the daemon then watches for it every few seconds. Plug it back in and it
+re-renders and carries on — the pane model stays current while it's away, so it
+comes back showing the present rather than the moment it was pulled. On WSL the
+reconnect only succeeds once `usbipd` has reattached the device.
+
 ## Status
 
 Working end to end on a Stream Deck MK.2 (15 keys): panes render with
@@ -151,14 +157,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 262 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 268 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 256 run anywhere, and pin the protocol quirks documented
+XDG default); the other 262 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

@@ -20,11 +20,22 @@ configuration below is what came out of a bake-off across nine hosted models:
   itself into offering replies to already-finished work 2 times in 12. The
   documented ``/no_think`` and ``detailed thinking off`` prompt tags do nothing;
   only the API parameter works.
-* **the schema, spelled out in the prompt as well as declared**. Fireworks
-  accepts ``strict: true`` and then does not enforce it for this model: declared
-  alone, ``waiting`` was omitted from 10 of 15 responses and reply objects came
-  back as ``{label, value}``. Restating the shape in the prompt costs 116 tokens
-  and takes conformance to 18/18.
+* **structured output, not a forced tool call**. Both conform, but the tool
+  definition is a second copy of the schema on the wire: 729 prompt tokens and
+  2.86s against 304 and 1.65s.
+* **the schema also spelled out in the prompt** (``SHAPE``). This was originally
+  credited with fixing conformance -- declared alone, an earlier schema omitted
+  ``waiting`` from 10 of 15 responses. That does not reproduce against the
+  current schema: with the restatement, with a one-line "reply only with JSON",
+  and with nothing at all, conformance is 20/20. The earlier failure was very
+  likely the old three-field shape rather than the missing prompt copy. SHAPE
+  stays because the retry path needs it to restate the contract, not because it
+  is load-bearing here.
+
+Worth knowing if any of this is ever revisited: ``reasoning_effort="low"``
+breaks structured output on this model -- 7/15, silently dropping ``responses``
+-- while a forced tool call conforms 15/15 at both efforts. The fragile
+combination is thinking plus a response schema, not thinking as such.
 
 The whole prompt is ours, which is the point: 237 tokens, none of them spent on
 somebody else's sandbox rules.

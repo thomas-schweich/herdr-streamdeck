@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,11 +15,18 @@ from herdr_streamdeck.daemon import (
     STATUS_COLORS,
     STRUCTURAL_EVENTS,
     DeckController,
+    ReplyOverlay,
     _iter_panes,
     reply_column,
     worth_summarising,
 )
-from herdr_streamdeck.deck import ButtonFace, NullSurface, PressHandler
+from herdr_streamdeck.deck import (
+    ButtonFace,
+    DeckDisconnected,
+    KeyFrames,
+    NullSurface,
+    PressHandler,
+)
 from herdr_streamdeck.icons import mark_for
 from herdr_streamdeck.protocol import Event, HerdrError, JSONObject
 from herdr_streamdeck.summary import PaneSummary, Reply, Summariser
@@ -939,4 +947,156 @@ async def test_a_closed_pane_closes_its_overlay() -> None:
     await asyncio.sleep(HOLD_SECONDS + 0.05)
     controller._remove("w1:p1")
 
+    assert controller._overlay is None
+
+
+# ------------------------------------------------------------- disconnection
+
+
+@dataclass
+class FlakySurface(NullSurface):
+    """A surface whose device can be yanked and plugged back in."""
+
+    plugged: bool = True
+    writes_attempted: int = 0
+    reopen_attempts: int = 0
+
+    @property
+    def connected(self) -> bool:
+        return self.plugged
+
+    def write(self, index: int, frames: KeyFrames, level_index: int) -> None:
+        self.writes_attempted += 1
+        if not self.plugged:
+            raise DeckDisconnected("gone")
+        super().write(index, frames, level_index)
+
+    def render(self, face: ButtonFace) -> KeyFrames:
+        if not self.plugged:
+            raise DeckDisconnected("gone")
+        return super().render(face)
+
+    def reopen(self) -> bool:
+        self.reopen_attempts += 1
+        return self.plugged
+
+
+async def flaky() -> tuple[DeckController, FlakySurface]:
+    surface = FlakySurface(key_count_=15, key_layout_=(3, 5))
+    controller = DeckController(
+        StubClient({"panes": [pane_record("w1:p1")]}), surface, reconcile_interval=99
+    )
+    controller._loop = asyncio.get_running_loop()
+    await controller.prime()
+    return controller, surface
+
+
+def force_writes(controller: DeckController) -> None:
+    """Make the next tick actually reach the device.
+
+    tick() skips a key whose level has not moved, and an idle pane is steady,
+    so without this the deck is never touched and a disconnect goes unnoticed.
+    """
+    controller._shown.clear()
+
+
+async def test_a_disconnect_is_reported_once_not_per_key(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every write goes to USB, so a pulled deck fails all fifteen of them at
+    20 fps. Logging each one produced 300 stack traces a second."""
+    controller, surface = await flaky()
+    caplog.set_level(logging.WARNING, logger="herdr_streamdeck")
+
+    surface.plugged = False
+    for _ in range(50):
+        force_writes(controller)
+        controller.tick(now=1.0)
+
+    said = [r for r in caplog.records if "disconnected" in r.message]
+    assert len(said) == 1, f"logged {len(said)} times"
+    assert not any(r.exc_info for r in caplog.records), "no stack traces"
+
+
+async def test_nothing_is_written_while_the_deck_is_away() -> None:
+    controller, surface = await flaky()
+    surface.plugged = False
+    force_writes(controller)
+    controller.tick(now=1.0)
+    before = surface.writes_attempted
+
+    for _ in range(20):
+        force_writes(controller)
+        controller.tick(now=2.0)
+        controller.repaint()
+
+    assert surface.writes_attempted == before, "it kept talking to an absent deck"
+
+
+async def test_it_comes_back_when_the_deck_does() -> None:
+    controller, surface = await flaky()
+    import herdr_streamdeck.daemon as daemon
+
+    original = daemon.RECONNECT_SECONDS
+    daemon.RECONNECT_SECONDS = 0.02
+    try:
+        surface.plugged = False
+        force_writes(controller)
+        controller.tick(now=1.0)
+        # Captured rather than asserted in place: asserting False here and True
+        # below narrows the attribute for mypy and makes the rest dead code.
+        dropped = controller._connected
+
+        surface.plugged = True
+        await asyncio.sleep(0.15)
+    finally:
+        daemon.RECONNECT_SECONDS = original
+
+    assert dropped is False, "the disconnect was never noticed"
+    assert controller._connected is True
+    assert surface.reopen_attempts >= 1
+    assert surface.faces, "the deck was redrawn on return"
+
+
+async def test_the_model_stays_current_while_disconnected() -> None:
+    """So the deck is right the moment it returns, rather than a state behind."""
+    controller, surface = await flaky()
+    surface.plugged = False
+    force_writes(controller)
+    controller.tick(now=1.0)
+
+    controller.handle(updated(pane_record("w1:p2")))
+    controller.repaint()
+
+    assert "w1:p2" in controller._panes
+
+
+async def test_frames_are_rebuilt_rather_than_reused_after_a_reconnect() -> None:
+    """They were encoded against the previous device handle."""
+    controller, surface = await flaky()
+    import herdr_streamdeck.daemon as daemon
+
+    original = daemon.RECONNECT_SECONDS
+    daemon.RECONNECT_SECONDS = 0.02
+    stale = controller._frames[0]
+    try:
+        surface.plugged = False
+        force_writes(controller)
+        controller.tick(now=1.0)
+        surface.plugged = True
+        await asyncio.sleep(0.15)
+    finally:
+        daemon.RECONNECT_SECONDS = original
+
+    assert controller._frames[0] is not stale
+
+
+async def test_a_reply_overlay_does_not_survive_a_disconnect() -> None:
+    controller, surface = await flaky()
+    controller._overlay = ReplyOverlay(
+        held=0, pane_id="w1:p1", keys={4: Reply("proceed", "go", "go")}
+    )
+    surface.plugged = False
+    force_writes(controller)
+    controller.tick(now=1.0)
     assert controller._overlay is None

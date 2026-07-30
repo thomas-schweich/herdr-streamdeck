@@ -39,7 +39,15 @@ from typing import Protocol
 
 from .animation import EMPTY_ANIMATION, Animation, animation_for, frame_index
 from .client import HerdrSession
-from .deck import EMPTY_BACKGROUND, RGB, ButtonFace, ButtonSurface, KeyFrames, open_surface
+from .deck import (
+    EMPTY_BACKGROUND,
+    RGB,
+    ButtonFace,
+    ButtonSurface,
+    DeckDisconnected,
+    KeyFrames,
+    open_surface,
+)
 from .icons import mark_for, resolve_override
 from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
 from .protocol import Event, HerdrError, JSONObject, subscription
@@ -108,6 +116,12 @@ REPLY_COLORS: dict[str, RGB] = {
     "proceed": (217, 132, 24),
     "alternative": (96, 200, 240),
 }
+
+RECONNECT_SECONDS = 3.0
+"""How often to look for a deck that went away.
+
+Frequent enough that plugging it back in feels immediate, sparse enough that an
+absent deck costs nothing -- enumeration is the only work, and it is cheap."""
 
 ANIMATION_FPS = 20
 """Frame rate for pulsing and blinking.
@@ -226,6 +240,9 @@ class DeckController:
         self._holding: int | None = None
         self._hold_task: asyncio.Task[None] | None = None
         self._overlay_task: asyncio.Task[None] | None = None
+        # False from the moment a write fails until the device is reacquired.
+        self._connected = True
+        self._reconnect_task: asyncio.Task[None] | None = None
 
     @property
     def grid(self) -> Grid:
@@ -288,6 +305,10 @@ class DeckController:
         animation is running.
         """
         self._rebuild_columns()
+        if not self._connected:
+            # The model stays current so the deck is right the moment it
+            # returns; there is just nothing to draw on.
+            return
         grid = self.grid
 
         overlay = self._overlay
@@ -307,6 +328,9 @@ class DeckController:
             if cached is None or cached.face != face:
                 try:
                     self._frames[index] = self._surface.render(face)
+                except DeckDisconnected:
+                    self._note_disconnect()
+                    return
                 except Exception:
                     logger.warning("could not render key %d", index, exc_info=True)
                     continue
@@ -322,6 +346,8 @@ class DeckController:
         1.34 ms, so a full 15-key refresh is 25 ms and blind rewriting would
         cap the deck at ~40 fps for no benefit. Returns the number of writes.
         """
+        if not self._connected:
+            return 0
         if now is None:
             loop = self._loop
             now = loop.time() if loop is not None else 0.0
@@ -336,6 +362,9 @@ class DeckController:
                 continue
             try:
                 self._surface.write(index, frames, level)
+            except DeckDisconnected:
+                self._note_disconnect()
+                return writes
             except Exception:
                 logger.warning("could not write key %d", index, exc_info=True)
                 continue
@@ -397,6 +426,46 @@ class DeckController:
         """Suggested replies for a pane, if any were offered."""
         summary = self._summaries.get(pane_id)
         return summary.replies if summary else ()
+
+    # ------------------------------------------------------------- connection
+
+    def _note_disconnect(self) -> None:
+        """Say it once, then stop talking to a device that is not there.
+
+        Every path that touches the deck funnels through here, so the first
+        failure is reported and the next few thousand are not.
+        """
+        if not self._connected:
+            return
+        self._connected = False
+        self._overlay = None
+        logger.warning("deck disconnected")
+        loop = self._loop
+        if loop is None:
+            return
+        if self._reconnect_task is None or self._reconnect_task.done():
+            self._reconnect_task = asyncio.create_task(self._reconnect_loop(), name="reconnect")
+
+    async def _reconnect_loop(self) -> None:
+        """Watch for the deck coming back, and redraw it when it does."""
+        while not self._connected:
+            await asyncio.sleep(RECONNECT_SECONDS)
+            try:
+                back = self._surface.reopen()
+            except Exception:
+                logger.debug("reopen failed", exc_info=True)
+                back = False
+            if not back:
+                continue
+            logger.info("deck reconnected")
+            self._connected = True
+            # The frames were encoded against the previous device handle, and
+            # its key format is only *probably* the same one. Re-render rather
+            # than trust that.
+            self._frames.clear()
+            self._shown.clear()
+            self._surface.set_press_handler(self._on_press)
+            self.repaint()
 
     # ------------------------------------------------------------------ presses
 
@@ -710,7 +779,9 @@ class DeckController:
             # self-reaping.
             logger.info("event stream closed; herdr is gone, shutting down")
         finally:
-            for task in (painter, animator, reconciler):
+            for task in (painter, animator, reconciler, self._reconnect_task):
+                if task is None:
+                    continue
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
