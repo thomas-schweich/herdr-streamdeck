@@ -753,13 +753,14 @@ PREVIEW_LINES_PER_ROW = 2
 A 72px key holds two comfortably at preview size, and one wasted most of the
 height."""
 
-PREVIEW_MARGIN = 0.07
-"""Left inset on the first column and right inset on the last, as a fraction of
-key width. Zero everywhere else.
+FLUSH_WINDOW = 4
+"""How many type sizes below the largest fitting one to consider.
 
-The point is to justify the block: margins on the outside so it does not run
-into the bezel, and none at all on the interior seams, so a word broken across
-two keys is separated by the physical gap and nothing more.
+Characters only land flush against a key's edges if the advance divides the key
+width nearly exactly, and whether it does is a property of the size. At 72px a
+17pt advance leaves 0.4px over seven characters where 19pt leaves 3.4px over
+six -- so the smaller size is *tighter*, not looser. Searching a short window
+below the best fit buys that alignment for at most a couple of points of size.
 """
 
 
@@ -790,14 +791,18 @@ def _wrap_chars(body: str, per_line: int, max_lines: int) -> list[str] | None:
     return lines if len(lines) <= max_lines else None
 
 
-def _capacities(columns: int, width: float, advance: float) -> list[int]:
-    """Characters each column can hold, given the outer margins."""
-    margin = width * PREVIEW_MARGIN
+def _capacities(columns: int, per_key: int) -> list[int]:
+    """Characters each column holds.
+
+    The outer margin is exactly one character wide, so the edge columns hold one
+    fewer than the rest. That is what puts the text flush against the interior
+    seams: the first column's line ends at the key's right edge and the last
+    column's begins at its left, leaving the bezel as the only gap.
+    """
     if columns == 1:
-        return [max(0, int((width - 2 * margin) // advance))]
-    edge = max(0, int((width - margin) // advance))
-    full = max(0, int(width // advance))
-    return [edge, *([full] * (columns - 2)), edge]
+        return [max(0, per_key - 2)]
+    edge = max(0, per_key - 1)
+    return [edge, *([per_key] * (columns - 2)), edge]
 
 
 def plan_preview(
@@ -810,10 +815,11 @@ def plan_preview(
     width to inset it by -- and the type size they all share.
 
     Lines break at spaces where they can, but a line spans the whole row and is
-    then cut at column boundaries by character count. That is deliberate: it is
-    what makes the row read as continuous text rather than as separate captions,
-    and with no interior margin a word split across two keys is interrupted by
-    the bezel and nothing else.
+    then cut at column boundaries by character count. That is what makes the row
+    read as continuous text rather than as separate captions, and with the
+    margin set to exactly one character the interior seams carry no slack at
+    all: a word broken across two keys is interrupted by the bezel and nothing
+    else.
     """
     from PIL import Image, ImageDraw
 
@@ -823,38 +829,45 @@ def plan_preview(
     draw = ImageDraw.Draw(Image.new("RGB", size))
     width = float(size[0])
     body = " ".join(text.split())
-    blank: list[tuple[str, float]] = [
-        ("", PREVIEW_MARGIN if column == 0 else 0.0)
-        for _ in range(rows)
-        for column in range(columns)
-    ]
+    blank: list[tuple[str, float]] = [("", 0.0) for _ in range(rows) for _ in range(columns)]
     if not body:
         return blank, MIN_MARK_SIZE
 
+    fits: list[tuple[float, int, list[int], list[str], float]] = []
     for point in range(PREVIEW_CAP, MIN_MARK_SIZE - 1, -1):
         advance = draw.textlength("M", font=load_font(point))
         if advance <= 0:
             continue
-        caps = _capacities(columns, width, advance)
-        per_line = sum(caps)
-        lines = _wrap_chars(body, per_line, rows * PREVIEW_LINES_PER_ROW)
+        per_key = int(width // advance)
+        if per_key < 3:
+            continue
+        caps = _capacities(columns, per_key)
+        lines = _wrap_chars(body, sum(caps), rows * PREVIEW_LINES_PER_ROW)
         if lines is None:
             continue
-        return _place(lines, caps, rows, columns), point
+        slack = width - per_key * advance
+        fits.append((slack, point, caps, lines, advance))
+        if len(fits) >= FLUSH_WINDOW:
+            break
+
+    if fits:
+        # Flushest first, and the largest size among equals.
+        slack, point, caps, lines, advance = min(fits, key=lambda f: (f[0], -f[1]))
+        return _place(lines, caps, rows, columns, advance / width), point
 
     # Too long for the block even at the smallest size: show the start of it.
-    advance = draw.textlength("M", font=load_font(MIN_MARK_SIZE))
-    caps = _capacities(columns, width, max(advance, 1.0))
+    advance = max(draw.textlength("M", font=load_font(MIN_MARK_SIZE)), 1.0)
+    caps = _capacities(columns, max(3, int(width // advance)))
     per_line = max(1, sum(caps))
     total = rows * PREVIEW_LINES_PER_ROW
     clipped = body[: per_line * total]
     clipped = clipped[:-1] + "\u2026" if len(clipped) > 1 else "\u2026"
     lines = [clipped[i : i + per_line] for i in range(0, len(clipped), per_line)][:total]
-    return _place(lines, caps, rows, columns), MIN_MARK_SIZE
+    return _place(lines, caps, rows, columns, advance / width), MIN_MARK_SIZE
 
 
 def _place(
-    lines: list[str], caps: list[int], rows: int, columns: int
+    lines: list[str], caps: list[int], rows: int, columns: int, inset: float
 ) -> list[tuple[str, float]]:
     """Cut each line at column boundaries and stack them onto their row."""
     per_row = PREVIEW_LINES_PER_ROW
@@ -870,8 +883,7 @@ def _place(
                 offset += cap
         for column in range(columns):
             text = "\n".join(stacked[column]).rstrip("\n")
-            inset = PREVIEW_MARGIN if column == 0 else 0.0
-            placed.append((text, inset))
+            placed.append((text, inset if column == 0 else 0.0))
     return placed
 
 

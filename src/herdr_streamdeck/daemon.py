@@ -104,8 +104,15 @@ HOLD_SECONDS = 0.45
 Long enough that a normal press-to-focus never trips it, short enough that the
 options feel like part of the same gesture rather than a separate mode."""
 
-MENU_BACKGROUND: RGB = (24, 26, 32)
-PREVIEW_BACKGROUND: RGB = (16, 17, 21)
+MENU_BACKGROUND: RGB = (62, 64, 74)
+"""The lit columns: choices on the left, controls on the right.
+
+Brighter than anything else on the deck while the menu is open, so the two
+columns you can actually press are obvious and the block between them reads as
+a display rather than as nine more buttons."""
+
+PREVIEW_BACKGROUND: RGB = (8, 8, 10)
+"""Near black behind the preview, for the same reason."""
 SELECTED_BORDER: RGB = (236, 236, 241)
 ACCEPT_COLOR: RGB = (34, 168, 82)
 BACK_COLOR: RGB = (120, 120, 130)

@@ -7,9 +7,12 @@ by the bezel and nothing else, and every key uses one type size.
 
 from __future__ import annotations
 
+import pytest
+from PIL import Image, ImageDraw
+
 from herdr_streamdeck.deck import (
     PREVIEW_LINES_PER_ROW,
-    PREVIEW_MARGIN,
+    load_font,
     plan_preview,
 )
 
@@ -39,12 +42,33 @@ def test_the_text_survives_the_journey_intact() -> None:
     assert " ".join(joined.split()) == TEXT
 
 
-def test_only_the_outer_columns_are_inset() -> None:
+def test_only_the_first_column_is_inset() -> None:
     """Interior seams carry no margin, so a word broken across two keys is
     separated by the bezel and nothing more."""
     cells, _ = plan_preview(TEXT, 3, 3, SIZE)
-    insets = [inset for _, inset in cells[:3]]
-    assert insets == [PREVIEW_MARGIN, 0.0, 0.0]
+    first, middle, last = (inset for _, inset in cells[:3])
+    assert first > 0
+    assert middle == 0.0 and last == 0.0
+
+
+def test_the_margin_is_exactly_one_character_wide() -> None:
+    """Which is what puts the text flush against the interior seams: the first
+    column ends at its right edge, the last begins at its left."""
+    cells, point = plan_preview(TEXT, 3, 3, SIZE)
+    draw = ImageDraw.Draw(Image.new("RGB", SIZE))
+    advance = draw.textlength("M", font=load_font(point))
+    assert cells[0][1] * SIZE[0] == pytest.approx(advance, abs=0.5)
+
+
+def test_the_size_chosen_leaves_the_columns_nearly_flush() -> None:
+    """Alignment is a property of the size: at 72px a 17pt advance leaves 0.4px
+    over seven characters where 19pt leaves 3.4px over six. The smaller size is
+    the tighter one, so the fitter looks past the largest that merely fits."""
+    _, point = plan_preview(TEXT, 3, 3, SIZE)
+    draw = ImageDraw.Draw(Image.new("RGB", SIZE))
+    advance = draw.textlength("M", font=load_font(point))
+    slack = SIZE[0] - int(SIZE[0] // advance) * advance
+    assert slack < 2.0, f"{point}pt leaves {slack:.1f}px of slack per key"
 
 
 def test_two_lines_fit_on_each_row() -> None:
