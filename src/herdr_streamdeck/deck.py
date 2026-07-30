@@ -749,6 +749,12 @@ height."""
 FLUSH_WINDOW = 4
 """How many type sizes below the largest fitting one to consider.
 
+Note that the size chosen is *not* the same on every platform. Bundling the font
+fixed the glyph shapes, but not the metrics: macOS ships a different FreeType
+and ``textlength`` rounds differently, so the same text can pick 17pt on Linux
+and 20pt on macOS. That is fine -- each picks what is flush for its own
+rasteriser -- but it means a test must assert the property, not the number.
+
 Characters only land flush against a key's edges if the advance divides the key
 width nearly exactly, and whether it does is a property of the size. At 72px a
 17pt advance leaves 0.4px over seven characters where 19pt leaves 3.4px over
