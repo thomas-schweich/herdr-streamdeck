@@ -20,9 +20,14 @@ configuration below is what came out of a bake-off across nine hosted models:
   itself into offering replies to already-finished work 2 times in 12. The
   documented ``/no_think`` and ``detailed thinking off`` prompt tags do nothing;
   only the API parameter works.
-* **structured output, not a forced tool call**. Both conform, but the tool
-  definition is a second copy of the schema on the wire: 729 prompt tokens and
-  2.86s against 304 and 1.65s.
+* **a forced tool call, not response_format**. Both conform with reasoning off,
+  but only one of them survives reasoning being on: at ``reasoning_effort="low"``
+  a response schema drops to 7/15, silently omitting ``responses``, where the
+  tool call holds 15/15 at both efforts. On a separate approve/deny classifier
+  the gap was starker still -- 25/25 against 15/25, and the schema's failures
+  clustered on exactly the inputs that mattered. Since ``"none"`` is
+  undocumented and could stop being honoured, the mechanism that does not
+  depend on it is the safer one to ship.
 * **the schema also spelled out in the prompt** (``SHAPE``). This was originally
   credited with fixing conformance -- declared alone, an earlier schema omitted
   ``waiting`` from 10 of 15 responses. That does not reproduce against the
@@ -57,6 +62,9 @@ logger = logging.getLogger(__name__)
 
 ENDPOINT = "https://api.fireworks.ai/inference/v1/chat/completions"
 MODEL = "accounts/fireworks/models/nemotron-3-ultra-nvfp4"
+
+TOOL_NAME = "label_pane"
+"""The one tool the model is forced to call. See Summariser._body."""
 
 REPLY_KINDS = ("affirmative", "negative", "proceed", "alternative")
 
@@ -352,14 +360,25 @@ class Summariser:
                 # documented value for every model on this endpoint, but it is
                 # for this one; others reject it with HTTP 400.
                 "reasoning_effort": "none",
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "pane",
-                        "strict": True,
-                        "schema": self._schema(),
-                    },
-                },
+                # A forced tool call rather than response_format. Both conform
+                # with reasoning off, but the tool call is the sturdier of the
+                # two: at reasoning_effort="low" a response schema drops to
+                # 7/15, silently omitting `responses`, while the tool call held
+                # 15/15 at both efforts and 25/25 on a separate classifier task
+                # where the schema managed 15/25. Since "none" is an
+                # undocumented value that could stop being honoured, the
+                # mechanism that survives reasoning is the safer one to ship.
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": TOOL_NAME,
+                            "description": "Label a pane on the Stream Deck.",
+                            "parameters": self._schema(),
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "function", "function": {"name": TOOL_NAME}},
                 "messages": messages,
             }
         ).encode()
@@ -383,10 +402,21 @@ class Summariser:
             return None
 
         try:
-            content = json.loads(raw)["choices"][0]["message"]["content"]
+            message = json.loads(raw)["choices"][0]["message"]
         except Exception:
             logger.warning("could not read summary response", exc_info=True)
             return None
+
+        calls = message.get("tool_calls") or []
+        if calls:
+            arguments = calls[0].get("function", {}).get("arguments")
+            if isinstance(arguments, str):
+                return arguments
+        # Falling back to plain content covers a model that answers in prose
+        # despite being told to call the tool -- which then fails to parse and
+        # goes down the retry path, rather than being mistaken for a transport
+        # failure and abandoned.
+        content = message.get("content")
         return content if isinstance(content, str) else None
 
     async def summarise(self, transcript: str) -> PaneSummary | None:

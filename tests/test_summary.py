@@ -42,6 +42,31 @@ GOOD = {
 
 
 def envelope(payload: object) -> bytes:
+    """A response shaped the way the model actually answers: a tool call."""
+    return json.dumps(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "label_pane",
+                                    "arguments": json.dumps(payload),
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    ).encode()
+
+
+def prose_envelope(payload: object) -> bytes:
+    """A model that answered in text instead of calling the tool."""
     return json.dumps({"choices": [{"message": {"content": json.dumps(payload)}}]}).encode()
 
 
@@ -197,9 +222,11 @@ async def test_the_request_asks_for_no_reasoning() -> None:
     assert seen[0]["temperature"] == 0.0
 
 
-async def test_the_schema_is_spelled_out_in_the_prompt_as_well_as_declared() -> None:
-    """Fireworks accepts `strict: true` for this model and does not enforce it.
-    The prompt copy is what actually binds -- 5/15 conformance without it."""
+async def test_the_answer_is_forced_through_a_tool_call() -> None:
+    """Both mechanisms conform with reasoning off, but only the tool call
+    survives reasoning being on: a response schema drops to 7/15 there,
+    silently omitting `responses`. Since `reasoning_effort="none"` is an
+    undocumented value, the deck should not depend on it holding."""
     seen: list[dict[str, object]] = []
 
     def send(body: bytes, timeout: float) -> bytes:
@@ -207,10 +234,27 @@ async def test_the_schema_is_spelled_out_in_the_prompt_as_well_as_declared() -> 
         return envelope(GOOD)
 
     await Summariser(transport=send).summarise("x")
-    fmt = seen[0]["response_format"]
-    assert isinstance(fmt, dict) and fmt["type"] == "json_schema"
+    assert "response_format" not in seen[0]
+    assert seen[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "label_pane"},
+    }
+    tools = seen[0]["tools"]
+    assert isinstance(tools, list) and len(tools) == 1
     for field in ("waiting", "summary", "responses"):
         assert field in SYSTEM_PROMPT, f"{field} is not described in the prompt"
+
+
+async def test_a_prose_answer_still_parses() -> None:
+    """A model that ignores tool_choice and answers in text should go down the
+    normal path, not be mistaken for a broken response."""
+
+    def send(body: bytes, timeout: float) -> bytes:
+        return prose_envelope(GOOD)
+
+    summary = await Summariser(transport=send).summarise("x")
+    assert summary is not None
+    assert summary.phrase == "remove or deprecate"
 
 
 async def test_only_the_tail_of_a_long_transcript_is_sent() -> None:
@@ -362,9 +406,9 @@ def test_the_reply_count_is_bound_to_the_deck_geometry() -> None:
     import asyncio
 
     asyncio.run(Summariser(transport=send, max_replies=3).summarise("x"))
-    fmt = seen[0]["response_format"]
-    assert isinstance(fmt, dict)
-    schema = fmt["json_schema"]["schema"]
+    tools = seen[0]["tools"]
+    assert isinstance(tools, list)
+    schema = tools[0]["function"]["parameters"]
     assert schema["properties"]["responses"]["maxItems"] == 3
 
 
@@ -378,9 +422,9 @@ def test_a_taller_deck_may_ask_for_more() -> None:
     import asyncio
 
     asyncio.run(Summariser(transport=send, max_replies=4).summarise("x"))
-    fmt = seen[0]["response_format"]
-    assert isinstance(fmt, dict)
-    assert fmt["json_schema"]["schema"]["properties"]["responses"]["maxItems"] == 4
+    tools = seen[0]["tools"]
+    assert isinstance(tools, list)
+    assert tools[0]["function"]["parameters"]["properties"]["responses"]["maxItems"] == 4
 
 
 def test_binding_the_count_does_not_mutate_the_shared_schema() -> None:
