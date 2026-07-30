@@ -7,6 +7,7 @@ by the bezel and nothing else, and every key uses one type size.
 
 from __future__ import annotations
 
+import pytest
 from PIL import Image, ImageDraw
 
 from herdr_streamdeck.deck import (
@@ -149,3 +150,44 @@ def test_a_degenerate_block_does_not_explode() -> None:
     assert plan_preview(TEXT, 0, 3, SIZE)[0] == []
     single, _ = plan_preview("hello", 1, 1, SIZE)
     assert len(single) == 1
+
+
+# ------------------------------------------------------- flush against edges
+
+
+def ink_extent(face_text: str, point: int) -> tuple[int, int]:
+    """Leftmost and rightmost columns of a rendered cell that contain ink."""
+    from herdr_streamdeck.deck import ButtonFace, compose_foreground
+
+    face = ButtonFace(summary=face_text, summary_size=point)
+    alpha = compose_foreground(SIZE, face).getchannel("A").tobytes()
+    columns = [
+        x for x in range(SIZE[0]) if any(alpha[y * SIZE[0] + x] > 64 for y in range(SIZE[1]))
+    ]
+    return (columns[0], columns[-1]) if columns else (-1, -1)
+
+
+@pytest.mark.parametrize("point", [13, 15, 17, 19, 20, 22])
+def test_a_full_line_reaches_both_edges_of_the_key(point: int) -> None:
+    """A key is only a whole number of characters wide if the advance happens to
+    divide its width -- which depends on the type size and on the platform's
+    rasteriser. Whatever it does not divide by used to sit unused on the right
+    of every key. Characters are placed individually so the row spans the key
+    exactly, at any size.
+    """
+    from PIL import Image, ImageDraw
+
+    from herdr_streamdeck.deck import load_font
+
+    draw = ImageDraw.Draw(Image.new("RGB", SIZE))
+    per_key = int(SIZE[0] // draw.textlength("M", font=load_font(point)))
+    left, right = ink_extent("M" * per_key, point)
+
+    assert 0 <= left <= 2, f"{point}pt starts {left}px in"
+    assert right >= SIZE[0] - 3, f"{point}pt stops {SIZE[0] - right}px short"
+
+
+def test_a_leading_space_still_indents() -> None:
+    """The margin is a real character, so it still holds its column."""
+    left, _ = ink_extent(" MMMMMM", 17)
+    assert left > 6, "the margin space collapsed"

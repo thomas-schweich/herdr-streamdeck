@@ -927,7 +927,7 @@ def _draw_summary(
     un-deprecating something.
     """
     if fixed:
-        _draw_cell(draw, text, height, fixed)
+        _draw_cell(draw, text, width, height, fixed)
         return
 
     # Bounded above by the status dot and below by the nameplate, both of
@@ -950,7 +950,7 @@ def _draw_summary(
         )
 
 
-def _draw_cell(draw: ImageDrawLike, text: str, height: int, point: int) -> None:
+def _draw_cell(draw: ImageDrawLike, text: str, width: int, height: int, point: int) -> None:
     """One key of a multi-key block of text.
 
     Always lays out ``PREVIEW_LINES_PER_ROW`` slots, blank ones included, so a
@@ -958,22 +958,34 @@ def _draw_cell(draw: ImageDrawLike, text: str, height: int, point: int) -> None:
     their first. Centring a lone line instead dropped it halfway between the
     two rows of text either side of it, which read as a typo.
 
-    Drawn from x=0: the margin is a literal space in the text, not an inset, so
-    the character columns line up from key to key by construction.
+    Characters are placed one at a time, spaced so the row spans the key exactly
+    -- first glyph flush left, last glyph's advance ending flush right. Drawing
+    the line as a single string cannot do that: a key is only a whole number of
+    characters wide if the advance happens to divide its width, which is a
+    property of the type size and the platform's rasteriser rather than
+    something we get to choose. Whatever it does not divide by is left over on
+    the right of every key, which is the inner margin this removes.
     """
     font = load_font(point)
     step = point * SUMMARY_LEADING
     start = (height - PREVIEW_LINES_PER_ROW * step) / 2
+    advance = draw.textlength("M", font=font)
+
     for index, line in enumerate(text.split("\n")[:PREVIEW_LINES_PER_ROW]):
         if not line.strip():
             continue
-        draw.text(
-            (0, start + step * (index + 0.5)),
-            line,
-            font=font,
-            anchor="lm",
-            fill=SUMMARY_COLOR,
-        )
+        y = start + step * (index + 0.5)
+        pitch = (width - advance) / (len(line) - 1) if len(line) > 1 else 0.0
+        for position, character in enumerate(line):
+            if character == " ":
+                continue
+            draw.text(
+                (position * pitch, y),
+                character,
+                font=font,
+                anchor="lm",
+                fill=SUMMARY_COLOR,
+            )
 
 
 def _fit_summary(
