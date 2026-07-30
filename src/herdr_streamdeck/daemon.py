@@ -597,13 +597,17 @@ class DeckController:
         faces[layout.back] = control_face("Back", BACK_COLOR)
 
         reply = menu.choice
-        chunks, size = plan_preview(
-            reply.text if reply else "", len(layout.preview), self._surface.key_size
+        cells, size = plan_preview(
+            reply.text if reply else "",
+            grid.rows,
+            max(0, grid.columns - 2),
+            self._surface.key_size,
         )
-        for key, chunk in zip(layout.preview, chunks, strict=True):
+        for key, (chunk, inset) in zip(layout.preview, cells, strict=True):
             faces[key] = ButtonFace(
                 summary=chunk,
                 summary_size=size,
+                summary_inset=inset,
                 background=PREVIEW_BACKGROUND,
             )
         # Whatever the menu does not name stays dark rather than showing a pane
