@@ -47,6 +47,7 @@ from .deck import (
     DeckDisconnected,
     KeyFrames,
     open_surface,
+    plan_preview,
 )
 from .icons import mark_for, resolve_override
 from .instance import AlreadyRunning, SingleInstance, lock_path, stop_running
@@ -103,14 +104,12 @@ HOLD_SECONDS = 0.45
 Long enough that a normal press-to-focus never trips it, short enough that the
 options feel like part of the same gesture rather than a separate mode."""
 
-OVERLAY_SECONDS = 5.0
-"""How long the options stay up after the held key is released.
+MENU_BACKGROUND: RGB = (24, 26, 32)
+PREVIEW_BACKGROUND: RGB = (16, 17, 21)
+SELECTED_BORDER: RGB = (236, 236, 241)
+ACCEPT_COLOR: RGB = (34, 168, 82)
+BACK_COLOR: RGB = (120, 120, 130)
 
-They outlive the hold because choosing one while still holding means two keys
-down at once, and a Stream Deck is light enough to slide across a desk when you
-do that. Hold, let go, then tap."""
-
-REPLY_BACKGROUND: RGB = (30, 34, 44)
 REPLY_COLORS: dict[str, RGB] = {
     "affirmative": (34, 168, 82),
     "negative": (204, 44, 44),
@@ -154,32 +153,67 @@ STRUCTURAL_EVENTS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class ReplyOverlay:
-    """The keys that mean something else while a key is held down."""
+class MenuLayout:
+    """Which key means what while the reply menu is open."""
 
-    held: int
-    pane_id: str
-    keys: dict[int, Reply]
+    options: dict[int, int]
+    """Key index -> index into the reply list."""
+
+    preview: tuple[int, ...]
+    """Key indices holding the selected reply's text, in reading order."""
+
+    accept: int
+    back: int
 
 
-def reply_column(held_index: int, columns: int) -> int:
-    """Which column the reply options occupy.
+def menu_layout(grid: Grid, count: int) -> MenuLayout:
+    """Lay the menu out across the whole deck.
 
-    The far side from the held key. One hand is on the deck holding a key and
-    covering the keys around it, so the options go where that hand is not.
+    Choices down the left, controls down the right, and the text you are about
+    to send filling everything between. The held key is not preserved: once the
+    menu is open the question is which reply, not which pane, and reserving a
+    key to answer a question nobody is asking wastes the widest part of the
+    display.
     """
-    if columns <= 1:
-        return 0
-    return 0 if (held_index % columns) >= columns / 2 else columns - 1
+    last = grid.columns - 1
+    options = {row * grid.columns: row for row in range(min(count, grid.rows))}
+    preview = tuple(
+        row * grid.columns + column for row in range(grid.rows) for column in range(1, last)
+    )
+    return MenuLayout(
+        options=options,
+        preview=preview,
+        accept=last,
+        back=(grid.rows - 1) * grid.columns + last,
+    )
 
 
-def reply_face(reply: Reply) -> ButtonFace:
-    """A key offering one suggested reply."""
+@dataclass(frozen=True, slots=True)
+class ReplyMenu:
+    """An open menu of suggested replies for one pane."""
+
+    pane_id: str
+    replies: tuple[Reply, ...]
+    selected: int = 0
+
+    @property
+    def choice(self) -> Reply | None:
+        if 0 <= self.selected < len(self.replies):
+            return self.replies[self.selected]
+        return None
+
+
+def option_face(reply: Reply, *, selected: bool) -> ButtonFace:
     return ButtonFace(
         summary=reply.label,
         status_color=REPLY_COLORS.get(reply.kind),
-        background=REPLY_BACKGROUND,
+        background=MENU_BACKGROUND,
+        border=SELECTED_BORDER if selected else None,
     )
+
+
+def control_face(label: str, color: RGB) -> ButtonFace:
+    return ButtonFace(summary=label, status_color=color, background=MENU_BACKGROUND)
 
 
 class HerdrLike(Protocol):
@@ -235,12 +269,11 @@ class DeckController:
         # One clock for the whole deck: phase must not depend on when a pane
         # started working, or keys pulse out of step with each other.
         self._epoch = 0.0
-        # Reply overlay: which key is being held, and what the other keys mean
-        # while it is. None whenever no key is held long enough.
-        self._overlay: ReplyOverlay | None = None
+        # The reply menu, once a key has been held long enough to open it. It
+        # stays until dismissed -- there is no timeout to race.
+        self._menu: ReplyMenu | None = None
         self._holding: int | None = None
         self._hold_task: asyncio.Task[None] | None = None
-        self._overlay_task: asyncio.Task[None] | None = None
         # False from the moment a write fails until the device is reacquired.
         self._connected = True
         self._reconnect_task: asyncio.Task[None] | None = None
@@ -264,9 +297,9 @@ class DeckController:
 
     def _remove(self, pane_id: str) -> bool:
         self._summaries.pop(pane_id, None)
-        overlay = self._overlay
-        if overlay is not None and overlay.pane_id == pane_id:
-            self._overlay = None
+        menu = self._menu
+        if menu is not None and menu.pane_id == pane_id:
+            self._menu = None
         return self._panes.pop(pane_id, None) is not None
 
     def _rebuild_columns(self) -> None:
@@ -312,12 +345,12 @@ class DeckController:
             return
         grid = self.grid
 
-        overlay = self._overlay
+        menu = self._menu
+        menu_faces = self._menu_faces(menu, grid) if menu is not None else {}
         for index in range(self._surface.key_count):
-            if overlay is not None and index in overlay.keys:
-                face = reply_face(overlay.keys[index])
-                # Steady and full: an option you are choosing between must not
-                # pulse under your finger.
+            if index in menu_faces:
+                face = menu_faces[index]
+                # Steady and full: keys you are choosing between must not pulse.
                 animation = EMPTY_ANIMATION
             else:
                 pane = grid.pane_at(self._columns, index)
@@ -439,7 +472,7 @@ class DeckController:
         if not self._connected:
             return
         self._connected = False
-        self._overlay = None
+        self._menu = None
         logger.warning("deck disconnected")
         loop = self._loop
         if loop is None:
@@ -483,14 +516,10 @@ class DeckController:
         loop.call_soon_threadsafe(self._key_down if pressed else self._key_up, index)
 
     def _key_down(self, index: int) -> None:
-        overlay = self._overlay
-        if overlay is not None:
-            if index in overlay.keys:
-                self._send_reply(overlay.pane_id, overlay.keys[index])
-                self._dismiss_overlay()
-                return
-            # Any other key cancels the offer and behaves normally.
-            self._dismiss_overlay()
+        menu = self._menu
+        if menu is not None:
+            self._menu_press(menu, index)
+            return
 
         pane = self.grid.pane_at(self._columns, index)
         if pane is None:
@@ -501,15 +530,31 @@ class DeckController:
             self._hold(index, pane.pane_id), name=f"hold-{index}"
         )
 
+    def _menu_press(self, menu: ReplyMenu, index: int) -> None:
+        layout = menu_layout(self.grid, len(menu.replies))
+        if index in layout.options:
+            chosen = layout.options[index]
+            if chosen != menu.selected:
+                self._menu = replace(menu, selected=chosen)
+                self.repaint()
+            return
+        if index == layout.accept:
+            reply = menu.choice
+            if reply is not None:
+                self._send_reply(menu.pane_id, reply)
+            self._close_menu()
+            return
+        if index == layout.back:
+            self._close_menu()
+            return
+        # The preview is a display, not a control. Pressing it does nothing --
+        # it is the text you are about to send, and nudging it should not send.
+
     def _key_up(self, index: int) -> None:
-        overlay = self._overlay
-        if overlay is not None and index == overlay.held:
-            # Let go of the held key and the options stay up, briefly, so the
-            # same finger can choose one. Holding both at once slides the deck.
+        if self._menu is not None:
+            # Releasing the key that opened the menu must not choose anything;
+            # the menu stays until Send or Back.
             self._holding = None
-            self._overlay_task = asyncio.create_task(
-                self._expire_overlay(), name="overlay-expiry"
-            )
             return
         if self._holding != index:
             return
@@ -528,7 +573,7 @@ class DeckController:
         task.add_done_callback(lambda _: None)
 
     async def _hold(self, index: int, pane_id: str) -> None:
-        """Open the reply overlay if the key stays down long enough."""
+        """Open the reply menu if the key stays down long enough."""
         await asyncio.sleep(HOLD_SECONDS)
         if self._holding != index:
             return
@@ -536,38 +581,45 @@ class DeckController:
         if not replies:
             logger.debug("held key %d but %s has no replies to offer", index, pane_id)
             return
-        grid = self.grid
-        column = reply_column(index, grid.columns)
-        keys = {
-            row * grid.columns + column: reply for row, reply in enumerate(replies[: grid.rows])
-        }
-        self._overlay = ReplyOverlay(held=index, pane_id=pane_id, keys=keys)
+        self._menu = ReplyMenu(pane_id=pane_id, replies=replies)
         logger.info(
-            "key %d held -> %d replies for %s in column %d",
-            index,
-            len(keys),
-            pane_id,
-            column,
+            "key %d held -> reply menu for %s (%d options)", index, pane_id, len(replies)
         )
         self.repaint()
 
-    async def _expire_overlay(self) -> None:
-        """Take the options away again if nothing is chosen."""
-        await asyncio.sleep(OVERLAY_SECONDS)
-        if self._overlay is not None:
-            logger.debug("reply options expired unchosen")
-            self._dismiss_overlay()
+    def _menu_faces(self, menu: ReplyMenu, grid: Grid) -> dict[int, ButtonFace]:
+        """Every key the menu occupies, which is all of them."""
+        layout = menu_layout(grid, len(menu.replies))
+        faces: dict[int, ButtonFace] = {}
+        for key, option in layout.options.items():
+            faces[key] = option_face(menu.replies[option], selected=option == menu.selected)
+        faces[layout.accept] = control_face("Send", ACCEPT_COLOR)
+        faces[layout.back] = control_face("Back", BACK_COLOR)
 
-    def _dismiss_overlay(self) -> None:
-        if self._overlay is None:
+        reply = menu.choice
+        chunks, size = plan_preview(
+            reply.text if reply else "", len(layout.preview), self._surface.key_size
+        )
+        for key, chunk in zip(layout.preview, chunks, strict=True):
+            faces[key] = ButtonFace(
+                summary=chunk,
+                summary_size=size,
+                background=PREVIEW_BACKGROUND,
+            )
+        # Whatever the menu does not name stays dark rather than showing a pane
+        # that pressing it would not focus.
+        for index in range(self._surface.key_count):
+            faces.setdefault(index, ButtonFace(background=EMPTY_BACKGROUND))
+        return faces
+
+    def _close_menu(self) -> None:
+        if self._menu is None:
             return
-        self._overlay = None
+        self._menu = None
         self._holding = None
-        for task in (self._hold_task, self._overlay_task):
-            if task is not None:
-                task.cancel()
-        self._hold_task = None
-        self._overlay_task = None
+        if self._hold_task is not None:
+            self._hold_task.cancel()
+            self._hold_task = None
         self.repaint()
 
     def _send_reply(self, pane_id: str, reply: Reply) -> None:
@@ -732,13 +784,16 @@ class DeckController:
                 existing = self._panes.get(pane_id)
                 if existing is not None and existing.status != status:
                     self._panes[pane_id] = replace(existing, status=status)
-                    # The old summary described the previous state, so it is now
-                    # actively misleading -- drop it before anything repaints.
-                    self._summaries.pop(pane_id, None)
-                    overlay = self._overlay
-                    if overlay is not None and overlay.pane_id == pane_id:
-                        # Those options answered the previous state.
-                        self._overlay = None
+                    if status == "working":
+                        # Only now is the summary out of date. It used to be
+                        # cleared on every transition, which meant glancing at
+                        # the deck and looking away lost the one thing you had
+                        # come to read -- and there is no reason to discard it
+                        # while the agent is still sitting on that answer.
+                        self._summaries.pop(pane_id, None)
+                        menu = self._menu
+                        if menu is not None and menu.pane_id == pane_id:
+                            self._menu = None
                     if worth_summarising(existing.status, status):
                         self._request_summary(pane_id)
                     self._dirty.set()

@@ -15,9 +15,9 @@ from herdr_streamdeck.daemon import (
     STATUS_COLORS,
     STRUCTURAL_EVENTS,
     DeckController,
-    ReplyOverlay,
+    ReplyMenu,
     _iter_panes,
-    reply_column,
+    menu_layout,
     worth_summarising,
 )
 from herdr_streamdeck.deck import (
@@ -28,6 +28,7 @@ from herdr_streamdeck.deck import (
     PressHandler,
 )
 from herdr_streamdeck.icons import mark_for
+from herdr_streamdeck.layout import Grid
 from herdr_streamdeck.protocol import Event, HerdrError, JSONObject
 from herdr_streamdeck.summary import PaneSummary, Reply, Summariser
 
@@ -642,7 +643,10 @@ def summariser_returning(summary: PaneSummary | None, calls: list[str]) -> Summa
 SUMMARY = PaneSummary(
     phrase="remove or deprecate",
     waiting=True,
-    replies=(Reply("affirmative", "Remove", "Remove it."),),
+    replies=(
+        Reply("affirmative", "Remove", "Remove it."),
+        Reply("alternative", "Deprecate", "Keep it behind a deprecation warning."),
+    ),
 )
 SHOWN = "remove or deprecate?"
 """What reaches the key: the question mark is appended from `waiting`, not
@@ -787,34 +791,34 @@ async def test_replies_are_kept_but_nothing_sends_them() -> None:
     await asyncio.sleep(0)
     await asyncio.sleep(0)
 
-    assert len(controller.replies_for("w1:p1")) == 1
+    assert len(controller.replies_for("w1:p1")) == 2
     assert not any(m.startswith("agent.") or m == "pane.send_text" for m, _ in client.requests)
 
 
-# ----------------------------------------------------------- hold for replies
+# ----------------------------------------------------------- the reply menu
 
 
-@pytest.mark.parametrize(
-    ("held", "columns", "expected"),
-    [
-        (0, 5, 4),  # far left held -> options far right
-        (1, 5, 4),
-        (3, 5, 0),  # right of centre -> options far left
-        (4, 5, 0),
-        (9, 5, 0),  # row 1, column 4
-        (5, 5, 4),  # row 1, column 0
-        (0, 1, 0),  # degenerate deck
-    ],
-)
-def test_options_appear_on_the_far_side_from_the_held_key(
-    held: int, columns: int, expected: int
-) -> None:
-    """One hand is on the deck holding a key and covering what is around it,
-    so the options go where that hand is not."""
-    assert reply_column(held, columns) == expected
+def test_the_menu_uses_the_whole_deck() -> None:
+    """Choices left, controls right, the text you are about to send between.
+
+    The key that was held is not reserved: once the menu is open the question
+    is which reply, not which pane, and keeping it would spend the widest part
+    of the display answering a question nobody is asking.
+    """
+    layout = menu_layout(Grid(rows=3, columns=5), count=3)
+    assert sorted(layout.options) == [0, 5, 10]
+    assert layout.accept == 4
+    assert layout.back == 14
+    assert layout.preview == (1, 2, 3, 6, 7, 8, 11, 12, 13)
+    assert len(set(layout.options) | set(layout.preview) | {layout.accept, layout.back}) == 14
 
 
-async def held_controller() -> tuple[DeckController, NullSurface, StubClient]:
+def test_the_menu_offers_no_more_options_than_it_has_rows() -> None:
+    layout = menu_layout(Grid(rows=3, columns=5), count=9)
+    assert len(layout.options) == 3
+
+
+async def menued() -> tuple[DeckController, NullSurface, StubClient]:
     calls: list[str] = []
     controller, surface, client = make_controller(snapshot={"panes": [pane_record("w1:p1")]})
     controller._loop = asyncio.get_running_loop()
@@ -828,89 +832,117 @@ async def held_controller() -> tuple[DeckController, NullSurface, StubClient]:
     return controller, surface, client
 
 
-async def test_holding_a_key_offers_its_replies() -> None:
-    controller, surface, _ = await held_controller()
-
-    surface.press(0)
-    await asyncio.sleep(HOLD_SECONDS + 0.05)
-
-    assert controller._overlay is not None
-    # Key 0 is column 0, so the options land in the last column.
-    assert surface.faces[4].summary == "Remove"
-
-
-async def test_a_tap_focuses_and_never_opens_the_overlay() -> None:
-    controller, surface, client = await held_controller()
-
-    surface.tap(0)
-    await asyncio.sleep(0.05)
-
-    assert controller._overlay is None
-    assert ("pane.focus", {"pane_id": "w1:p1"}) in client.requests
-
-
-async def test_the_options_outlive_the_hold() -> None:
-    """Choosing while still holding means two keys down at once, and the deck
-    is light enough to slide across a desk when you do that. So letting go
-    leaves the options up for the same finger to tap."""
-    controller, surface, client = await held_controller()
-
+async def open_menu(controller: DeckController, surface: NullSurface) -> None:
     surface.press(0)
     await asyncio.sleep(HOLD_SECONDS + 0.05)
     surface.press(0, pressed=False)
     await asyncio.sleep(0.02)
 
-    assert controller._overlay is not None, "releasing must not take the options away"
-    assert not any(m == "agent.prompt" for m, _ in client.requests)
-    assert not any(m == "pane.focus" for m, _ in client.requests), (
-        "letting go of a hold should not also focus the pane"
-    )
+
+async def test_holding_opens_a_menu_that_stays_open() -> None:
+    """No timeout to race. It closes when you say so."""
+    controller, surface, _ = await menued()
+    await open_menu(controller, surface)
+
+    assert controller._menu is not None
+    await asyncio.sleep(0.4)
+    assert controller._menu is not None, "it must not time out"
+    assert surface.faces[4].summary == "Send"
+    assert surface.faces[14].summary == "Back"
 
 
-async def test_the_options_expire_if_nothing_is_chosen() -> None:
-    controller, surface, client = await held_controller()
-    controller_seconds = 0.15
-    import herdr_streamdeck.daemon as daemon
+async def test_the_selected_option_is_the_one_with_a_border() -> None:
+    controller, surface, _ = await menued()
+    await open_menu(controller, surface)
 
-    original = daemon.OVERLAY_SECONDS
-    daemon.OVERLAY_SECONDS = controller_seconds
-    try:
-        surface.press(0)
-        await asyncio.sleep(HOLD_SECONDS + 0.05)
-        surface.press(0, pressed=False)
-        await asyncio.sleep(controller_seconds + 0.1)
-    finally:
-        daemon.OVERLAY_SECONDS = original
+    # Captured rather than asserted in place: asserting None then not-None on
+    # the same attribute narrows it for mypy and kills the rest of the test.
+    first_before = surface.faces[0].border
+    second_before = surface.faces[5].border
 
-    assert controller._overlay is None
-    assert not any(m == "agent.prompt" for m, _ in client.requests)
+    surface.press(5)
+    await asyncio.sleep(0.02)
+    first_after = surface.faces[0].border
+    second_after = surface.faces[5].border
+
+    assert first_before is not None, "the first option starts selected"
+    assert second_before is None
+    assert first_after is None
+    assert second_after is not None
 
 
-async def test_tapping_an_option_after_releasing_sends_it() -> None:
-    """Hold, let go, tap -- one finger throughout."""
-    controller, surface, client = await held_controller()
+async def test_the_preview_shows_the_selected_reply_verbatim() -> None:
+    """Character boundaries, not word boundaries: the cells are meant to read
+    as one screen, so the text is simply chunked across them."""
+    controller, surface, _ = await menued()
+    await open_menu(controller, surface)
 
-    surface.press(0)
-    await asyncio.sleep(HOLD_SECONDS + 0.05)
-    surface.press(0, pressed=False)
-    surface.tap(4)
+    shown = "".join(surface.faces[k].summary for k in (1, 2, 3, 6, 7, 8, 11, 12, 13))
+    assert shown == SUMMARY.replies[0].text, "the exact text, not the label"
+
+
+async def test_every_preview_key_uses_the_same_type_size() -> None:
+    """A line crossing the deck must not step up and down as it goes."""
+    controller, surface, _ = await menued()
+    await open_menu(controller, surface)
+
+    sizes = {
+        surface.faces[k].summary_size for k in (1, 2, 3, 6, 7, 8) if surface.faces[k].summary
+    }
+    assert len(sizes) == 1 and 0 not in sizes
+
+
+async def test_selecting_a_different_option_updates_the_preview() -> None:
+    controller, surface, _ = await menued()
+    await open_menu(controller, surface)
+    before = surface.faces[1].summary
+
+    surface.press(5)
+    await asyncio.sleep(0.02)
+    assert surface.faces[1].summary != before
+
+
+async def test_send_sends_the_selection_and_closes() -> None:
+    controller, surface, client = await menued()
+    await open_menu(controller, surface)
+
+    surface.press(4)
     await asyncio.sleep(0.05)
 
     assert ("agent.prompt", {"target": "w1:p1", "text": "Remove it."}) in client.requests
-    assert controller._overlay is None, "the overlay closes once a reply is sent"
+    assert controller._menu is None
 
 
-async def test_any_other_key_cancels_the_offer() -> None:
-    controller, surface, client = await held_controller()
+async def test_back_closes_without_sending() -> None:
+    controller, surface, client = await menued()
+    await open_menu(controller, surface)
 
-    surface.press(0)
-    await asyncio.sleep(HOLD_SECONDS + 0.05)
-    surface.press(0, pressed=False)
-    surface.tap(1)
+    surface.press(14)
     await asyncio.sleep(0.05)
 
-    assert controller._overlay is None
+    assert controller._menu is None
     assert not any(m == "agent.prompt" for m, _ in client.requests)
+
+
+async def test_pressing_the_preview_does_nothing() -> None:
+    """It is the text about to be sent, not a button. Nudging it must not send."""
+    controller, surface, client = await menued()
+    await open_menu(controller, surface)
+
+    for key in (1, 7, 13):
+        surface.press(key)
+    await asyncio.sleep(0.05)
+
+    assert controller._menu is not None
+    assert not any(m == "agent.prompt" for m, _ in client.requests)
+
+
+async def test_the_menu_closes_when_the_agent_gets_back_to_work() -> None:
+    controller, surface, _ = await menued()
+    await open_menu(controller, surface)
+
+    controller.handle(status_changed("w1:p1", "working"))
+    assert controller._menu is None
 
 
 async def test_holding_a_pane_with_no_replies_does_nothing() -> None:
@@ -922,32 +954,52 @@ async def test_holding_a_pane_with_no_replies_does_nothing() -> None:
     surface.press(0)
     await asyncio.sleep(HOLD_SECONDS + 0.05)
 
-    assert controller._overlay is None
+    assert controller._menu is None
     surface.press(0, pressed=False)
     await asyncio.sleep(0.02)
     assert not any(m == "agent.prompt" for m, _ in client.requests)
 
 
-async def test_a_new_status_closes_a_stale_overlay() -> None:
-    """Those options answered the state the pane was in a moment ago."""
-    controller, surface, _ = await held_controller()
+async def test_a_tap_focuses_and_never_opens_the_menu() -> None:
+    controller, surface, client = await menued()
 
-    surface.press(0)
-    await asyncio.sleep(HOLD_SECONDS + 0.05)
-    assert controller._overlay is not None
+    surface.tap(0)
+    await asyncio.sleep(0.05)
 
+    assert controller._menu is None
+    assert ("pane.focus", {"pane_id": "w1:p1"}) in client.requests
+
+
+# -------------------------------------------------------- summaries persist
+
+
+async def test_a_summary_survives_being_looked_at() -> None:
+    """Glancing at the deck and looking away used to lose the one thing you
+    came to read. Nothing about viewing it makes it wrong."""
+    controller, surface, _ = await menued()
+    controller.repaint()
+    assert surface.faces[0].summary == SHOWN
+
+    for _ in range(20):
+        controller.tick(now=5.0)
+        controller.repaint()
+
+    assert surface.faces[0].summary == SHOWN
+
+
+async def test_a_summary_survives_a_status_change_that_is_not_work() -> None:
+    controller, surface, _ = await menued()
+    controller.handle(status_changed("w1:p1", "idle"))
+    controller.repaint()
+    assert surface.faces[0].summary == SHOWN
+
+
+async def test_a_summary_is_cleared_when_the_agent_starts_working() -> None:
+    """Then, and only then, it describes something that is no longer true."""
+    controller, surface, _ = await menued()
     controller.handle(status_changed("w1:p1", "working"))
-    assert controller._overlay is None
-
-
-async def test_a_closed_pane_closes_its_overlay() -> None:
-    controller, surface, _ = await held_controller()
-
-    surface.press(0)
-    await asyncio.sleep(HOLD_SECONDS + 0.05)
-    controller._remove("w1:p1")
-
-    assert controller._overlay is None
+    controller.repaint()
+    assert surface.faces[0].summary == ""
 
 
 # ------------------------------------------------------------- disconnection
@@ -1091,12 +1143,10 @@ async def test_frames_are_rebuilt_rather_than_reused_after_a_reconnect() -> None
     assert controller._frames[0] is not stale
 
 
-async def test_a_reply_overlay_does_not_survive_a_disconnect() -> None:
+async def test_the_reply_menu_does_not_survive_a_disconnect() -> None:
     controller, surface = await flaky()
-    controller._overlay = ReplyOverlay(
-        held=0, pane_id="w1:p1", keys={4: Reply("proceed", "go", "go")}
-    )
+    controller._menu = ReplyMenu(pane_id="w1:p1", replies=(Reply("proceed", "go", "go"),))
     surface.plugged = False
     force_writes(controller)
     controller.tick(now=1.0)
-    assert controller._overlay is None
+    assert controller._menu is None

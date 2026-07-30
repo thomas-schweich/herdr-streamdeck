@@ -185,6 +185,17 @@ class ButtonFace:
     status_color: RGB | None = None
     """Dot in the top-right corner. None draws no dot."""
 
+    border: RGB | None = None
+    """Outline around the whole key. Marks the selected reply in the menu."""
+
+    summary_size: int = 0
+    """Force a type size for ``summary``, and centre it in the whole key.
+
+    Zero means fit it, which is right for a pane label sharing the key with a
+    dot and a nameplate. A fixed size is for text spread across several keys:
+    each key must use the *same* size or the line steps up and down as it
+    crosses the deck."""
+
     background: RGB = BACKGROUND
     """The field at full brightness. Quieter levels interpolate down from it;
     see field_at."""
@@ -276,6 +287,11 @@ class ButtonSurface(Protocol):
     @property
     def connected(self) -> bool: ...
 
+    @property
+    def key_size(self) -> tuple[int, int]:
+        """Pixel size of one key. Needed to lay text across several of them."""
+        ...
+
     def reopen(self) -> bool:
         """Try to reacquire the device. False if it is still absent."""
         ...
@@ -316,6 +332,10 @@ class NullSurface:
     @property
     def connected(self) -> bool:
         return True
+
+    @property
+    def key_size(self) -> tuple[int, int]:
+        return (72, 72)
 
     def reopen(self) -> bool:
         self.opened = True
@@ -380,6 +400,7 @@ class StreamDeckSurface:
         self._lock = threading.Lock()
         self._key_count = 0
         self._key_layout = (0, 0)
+        self._key_size = (72, 72)
 
     @property
     def key_count(self) -> int:
@@ -422,7 +443,10 @@ class StreamDeckSurface:
         chosen.set_brightness(self._brightness)
         chosen.set_key_callback(self._on_key)
 
+        from StreamDeck.ImageHelpers import PILHelper
+
         self._deck = chosen
+        self._key_size = PILHelper.create_key_image(chosen).size
         self._key_count = int(chosen.key_count())
         rows, columns = chosen.key_layout()
         self._key_layout = (int(rows), int(columns))
@@ -444,6 +468,10 @@ class StreamDeckSurface:
     @property
     def connected(self) -> bool:
         return self._deck is not None
+
+    @property
+    def key_size(self) -> tuple[int, int]:
+        return self._key_size
 
     def _drop(self) -> None:
         """Let go of a device that is no longer answering.
@@ -606,14 +634,28 @@ def compose_foreground(size: tuple[int, int], face: ButtonFace) -> ImageLike:
             )
 
     if summarised:
-        _draw_summary(draw, face.summary, width, height)
+        _draw_summary(draw, face.summary, width, height, face.summary_size)
     # The nameplate stays up alongside a summary. Fading the mark to a
     # watermark freed the middle of the key, and knowing *which* pane is asking
     # matters as much as what it asked.
     if face.badge:
         _draw_badge(draw, face.badge, width, height)
 
+    if face.border is not None:
+        # Last, and inset by its own width, so the whole stroke lands on the key
+        # rather than half of it falling off the edge.
+        inset = BORDER_WIDTH / 2
+        draw.rounded_rectangle(
+            (inset, inset, width - 1 - inset, height - 1 - inset),
+            radius=6,
+            outline=face.border,
+            width=BORDER_WIDTH,
+        )
+
     return layer
+
+
+BORDER_WIDTH = 3
 
 
 WATERMARK_ALPHA = 64
@@ -653,6 +695,13 @@ SUMMARY_COLOR: RGB = (232, 232, 238)
 
 
 SUMMARY_LINES = 3
+SUMMARY_LEADING = 1.02
+"""Line spacing for a summary, as a multiple of the type size.
+
+Tight on purpose. The block is centred in its band, so pulling the lines
+together does not move the first one up -- it buys clear space underneath,
+between the last line and the nameplate."""
+
 SUMMARY_CAP = 18
 """Largest summary type size. Above this a two-word label looks shouty next to
 the agent marks, which are the thing that should read first at a glance."""
@@ -684,7 +733,59 @@ def wrap_to_width(
     return lines
 
 
-def _draw_summary(draw: ImageDrawLike, text: str, width: int, height: int) -> None:
+PREVIEW_CAP = 22
+"""Largest type size for the reply preview.
+
+Bigger than a summary: the preview spans several keys, so it has the room, and
+it is text you are about to send rather than glance at."""
+
+
+def plan_preview(text: str, cells: int, size: tuple[int, int]) -> tuple[list[str], int]:
+    """Lay `text` out across `cells` keys, and say what size to draw it at.
+
+    Breaks at *character* boundaries, not word boundaries, so the cells read as
+    one continuous screen rather than as a row of two-word captions. The font
+    is monospace, so every cell holds the same number of characters and the
+    columns line up across the physical gaps.
+
+    What is never allowed is a character split down the middle by a gap, which
+    is what slicing one wide image into key-sized pieces would do. Chunking the
+    string instead means every glyph lands wholly on one key.
+
+    Returns the chunk for each key in reading order, padded with empty strings,
+    and the type size they all share.
+    """
+    from PIL import Image, ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", size))
+    budget = size[0] * 0.88
+    body = " ".join(text.split())
+    if not body or cells < 1:
+        return [""] * max(cells, 0), MIN_MARK_SIZE
+
+    for point in range(PREVIEW_CAP, MIN_MARK_SIZE - 1, -1):
+        advance = draw.textlength("M", font=load_font(point))
+        if advance <= 0:
+            continue
+        per_cell = int(budget // advance)
+        if per_cell < 2:
+            continue
+        if len(body) <= per_cell * cells:
+            chunks = [body[i : i + per_cell] for i in range(0, len(body), per_cell)]
+            return chunks + [""] * (cells - len(chunks)), point
+
+    # Longer than the deck can hold even at the smallest size.
+    advance = draw.textlength("M", font=load_font(MIN_MARK_SIZE))
+    per_cell = max(2, int(budget // advance) if advance > 0 else 2)
+    clipped = body[: per_cell * cells]
+    clipped = clipped[:-1] + "\u2026"
+    chunks = [clipped[i : i + per_cell] for i in range(0, len(clipped), per_cell)]
+    return chunks + [""] * (cells - len(chunks)), MIN_MARK_SIZE
+
+
+def _draw_summary(
+    draw: ImageDrawLike, text: str, width: int, height: int, fixed: int = 0
+) -> None:
     """A short phrase, wrapped and centred in the middle of the key.
 
     One size for the whole block, chosen as the largest that fits. Sizing each
@@ -698,29 +799,58 @@ def _draw_summary(draw: ImageDrawLike, text: str, width: int, height: int) -> No
     """
     # Bounded above by the status dot and below by the nameplate, both of
     # which stay visible.
-    top = height * 0.22
-    available = height * 0.76 - top
-    budget = width * 0.92
+    lines: list[str]
+    if fixed:
+        # A cell in a multi-key line: no dot or nameplate to leave room for, so
+        # it uses the whole key and the caller's size.
+        top, available = 0.0, float(height)
+        font = load_font(fixed)
+        size = fixed
+        lines = [text]
+    else:
+        top = height * 0.22
+        available = height * 0.72 - top
+        fitted, size, font = _fit_summary(draw, text, width, available)
+        if fitted is None:
+            return
+        lines = fitted
 
+    step = size * SUMMARY_LEADING
+    start = top + (available - len(lines) * step) / 2
+    for index, line in enumerate(lines):
+        if fixed:
+            # Left-aligned at a fixed inset so the character columns line up
+            # from key to key; centring would ragged-edge every short chunk and
+            # break the illusion of one screen.
+            draw.text(
+                (width * 0.06, start + step * (index + 0.5)),
+                line,
+                font=font,
+                anchor="lm",
+                fill=SUMMARY_COLOR,
+            )
+        else:
+            draw.text(
+                (width / 2, start + step * (index + 0.5)),
+                line,
+                font=font,
+                anchor="mm",
+                fill=SUMMARY_COLOR,
+            )
+
+
+def _fit_summary(
+    draw: ImageDrawLike, text: str, width: int, available: float
+) -> tuple[list[str] | None, int, ImageFontLike]:
+    budget = width * 0.92
     for size in range(SUMMARY_CAP, MIN_MARK_SIZE - 1, -1):
         font = load_font(size)
         lines = wrap_to_width(draw, text, font, budget)
         if lines is None or not lines:
             continue
-        if len(lines) <= SUMMARY_LINES and len(lines) * size * 1.18 <= available:
-            break
-    else:
-        return
-
-    slot = available / len(lines)
-    for index, line in enumerate(lines):
-        draw.text(
-            (width / 2, top + slot * (index + 0.5)),
-            line,
-            font=font,
-            anchor="mm",
-            fill=SUMMARY_COLOR,
-        )
+        if len(lines) <= SUMMARY_LINES and len(lines) * size * SUMMARY_LEADING <= available:
+            return lines, size, font
+    return None, MIN_MARK_SIZE, load_font(MIN_MARK_SIZE)
 
 
 def _draw_badge(draw: ImageDrawLike, text: str, width: int, height: int) -> None:

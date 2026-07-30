@@ -58,13 +58,23 @@ The question mark is appended from a `waiting` flag rather than asked for, so no
 word is spent restating that a question was asked. The agent's mark fades to a
 watermark behind the words, keeping the nameplate and status dot in view.
 
-**Hold a key** for 0.45s and its suggested replies appear in the column furthest
-from your hand. Let go — they stay up for five seconds, so the same finger can
-tap one. Choosing sends it to the agent via `agent.prompt`; any other key, or
-five seconds of nothing, dismisses.
+**Hold a key** for 0.45s and the deck becomes a reply menu: suggestions down the
+left, `Send` and `Back` down the right, and the exact text you are about to send
+filling the nine keys between. The selected suggestion is outlined; press
+another to change it. Nothing is sent until `Send`, and the menu stays until you
+choose or go back.
+
+The preview breaks at character boundaries rather than word boundaries, so the
+middle keys read as one screen rather than nine captions — the font is monospace
+so the columns line up across the physical gaps. No glyph is ever split by a
+gap, which is what slicing one wide image into key-sized pieces would do.
 
 Replies are answers when the agent asked something, and next steps when it did
 not — `push it`, `open PR`, `check CI`.
+
+A summary stays up once it appears. It is cleared when that agent starts working
+again, and not before: glancing at the deck and looking away shouldn't lose the
+one thing you came to read.
 
 Set `FIREWORKS_API_KEY` (environment or `.env`) to enable it; without a key the
 deck runs exactly as before. `--no-summaries` turns it off explicitly. Every
