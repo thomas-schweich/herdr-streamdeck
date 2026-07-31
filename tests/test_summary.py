@@ -28,6 +28,7 @@ from herdr_streamdeck.summary import (
     api_key,
     build,
     check,
+    last_message,
     parse,
     strip_input_box,
 )
@@ -272,7 +273,9 @@ async def test_only_the_tail_of_a_long_transcript_is_sent() -> None:
     assert isinstance(messages, list)
     content = messages[1]["content"]
     assert "TAIL" in content
-    assert len(content) < 250
+    # The cap is on the transcript, not on the whole turn -- which also carries
+    # the closing block quoted back and the instruction that points at it.
+    assert "A" * 150 not in content, "the transcript was not capped"
 
 
 async def test_an_empty_transcript_makes_no_request() -> None:
@@ -607,3 +610,55 @@ async def test_the_summariser_strips_before_sending() -> None:
     sent = str(messages[1]["content"])
     assert "kimi" not in sent
     assert "orjson" in sent
+
+
+# ------------------------------------------------------- pointing at the end
+
+SCROLLBACK = "\n".join(
+    [
+        "• Should I delete the legacy /v1/login endpoint, or keep it deprecated?",
+        "",
+        "",
+        "› yes remove it",
+        "",
+        "",
+        "• I finished adding a retry wrapper to the S3 client. All 12 tests pass.",
+    ]
+)
+
+
+def test_the_last_message_is_the_closing_block() -> None:
+    assert last_message(SCROLLBACK) == (
+        "• I finished adding a retry wrapper to the S3 client. All 12 tests pass."
+    )
+
+
+def test_a_multi_line_closing_block_is_kept_whole() -> None:
+    text = "old news\n\nline one\nline two\nline three"
+    assert last_message(text) == "line one\nline two\nline three"
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n\n"])
+def test_an_empty_transcript_has_no_last_message(text: str) -> None:
+    assert last_message(text) == ""
+
+
+async def test_the_request_points_at_the_end_of_the_scrollback() -> None:
+    """The scrollback alone does not say which part is current. A Codex pane
+    holding an old "delete or deprecate?" above a newer "retry wrapper added"
+    was labelled with the question every time -- and offered replies to it,
+    which would have answered something nobody was waiting on."""
+    seen: list[dict[str, object]] = []
+
+    def send(body: bytes, timeout: float) -> bytes:
+        seen.append(json.loads(body))
+        return envelope(GOOD)
+
+    await Summariser(transport=send).summarise(SCROLLBACK)
+    messages = seen[0]["messages"]
+    assert isinstance(messages, list)
+    sent = str(messages[1]["content"])
+
+    assert sent.count("retry wrapper") == 2, "quoted back as well as in context"
+    assert sent.count("Should I delete") == 1, "the old question stays context only"
+    assert "latest message" in sent

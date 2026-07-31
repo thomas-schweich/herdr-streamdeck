@@ -68,5 +68,9 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 #                   sits too low and reads as a typo.
 #   U+276F CHEVRON  Codex's mark. Heavier and taller than ASCII `>`, which
 #                   measures 13x24 against Claude's 22x23 -- a plain `>` reads
-#                   as punctuation next to it rather than as a logo.
-allowed-confusables = ["′", "❯"]
+#                   as punctuation next to it rather than as a logo. Also the
+#                   glyph Claude Code starts its input line with.
+#   U+203A         What Codex starts its input line with. Both appear in
+#                   summary.PROMPT_MARKERS, which is how the terminal's own
+#                   furniture is told from the agent's words.
+allowed-confusables = ["′", "❯", "›"]

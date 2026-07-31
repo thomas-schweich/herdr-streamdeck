@@ -140,10 +140,16 @@ When the agent offers alternatives, name the alternatives themselves.
 
 Never describe your own output or these instructions.
 
-The transcript is a screenshot of a terminal, so it ends with the agent's
-interface, not with the agent's words: an input box, a status line, a spinner,
-a completion the user is part-way through typing. Ignore all of it. Summarise
-the last thing the AGENT said, never what the user is typing back.
+The transcript is scrollback: it holds the whole conversation, and everything
+above the end has already been dealt with. Summarise only the agent's LAST
+message. Earlier questions in it were answered long ago -- describing one of
+those puts a stale question on the deck, and offers replies to something nobody
+is waiting on.
+
+It is also a screenshot of a terminal, so it may end with the agent's interface
+rather than its words: an input box, a status line, a spinner, or placeholder
+text the harness shows in an empty box. Ignore all of it, and never summarise
+what the user is typing back.
 
 Always offer replies -- they are one-tap shortcuts on the deck.
 
@@ -225,6 +231,13 @@ RULE_CHARACTERS = frozenset(
 )
 """Characters a terminal draws a horizontal rule out of."""
 
+PROMPT_MARKERS = frozenset("\u276f\u203a\u276d\u00bb")
+"""Glyphs a harness starts its input line with: Claude Code's heavy chevron,
+Codex's single angle quote, and near relatives.
+
+Only counted at column zero. A dialog listing "  \u276f 1. Resume from summary"
+is indented, and it is content -- the question being asked -- not furniture."""
+
 RULE_MINIMUM = 30
 """Shortest run that counts as a rule, in characters.
 
@@ -247,11 +260,40 @@ BOX_HEIGHT = 3
 A prompt box is rule / input / rule, so its rules are two lines apart."""
 
 
+def _is_prompt(line: str) -> bool:
+    # A set, not a string: `line[:1] in "..."` is a substring test, so every
+    # blank line matched and the walk-up chewed through the whole transcript.
+    return bool(line) and line[0] in PROMPT_MARKERS
+
+
 def _is_rule(line: str) -> bool:
     stripped = line.strip()
     if len(stripped) < RULE_MINIMUM:
         return False
     return sum(character in RULE_CHARACTERS for character in stripped) / len(stripped) >= 0.9
+
+
+LAST_MESSAGE_CHARS = 600
+"""How much of the closing block to quote back. Enough to hold a message,
+short enough that it cannot drown the transcript it is pointing into."""
+
+
+def last_message(text: str) -> str:
+    """The final run of non-blank lines: where the agent's latest message ends.
+
+    Quoted back to the model alongside the full scrollback, because on its own
+    the scrollback does not say which part is current. A Codex pane holding an
+    old "delete or deprecate?" above a newer "retry wrapper added" was labelled
+    with the question every time -- and offered replies to it, which would have
+    answered something nobody was waiting on.
+    """
+    block: list[str] = []
+    for line in reversed(text.rstrip().split("\n")):
+        if line.strip():
+            block.append(line)
+        elif block:
+            break
+    return "\n".join(reversed(block))[-LAST_MESSAGE_CHARS:]
 
 
 def strip_input_box(text: str) -> str:
@@ -268,23 +310,49 @@ def strip_input_box(text: str) -> str:
     lines" nearly works -- but a pane showing a *dialog* has no input box, and
     dropping its last three lines removes the question being asked.
 
-    Finding rules is not enough on its own either: a dialog is drawn with rules
-    too. What distinguishes the input box is that it sits at the *bottom*, with
-    only a status line or two under it, so only rules within TRAILING_LINES of
-    the end count. A pane with nothing matching is left entirely alone, which is
-    the right answer for a harness whose furniture we have never seen.
+    Rules alone are not enough. A dialog is drawn with rules too, and Codex
+    draws no rules at all -- its input line is a bare chevron with a status line
+    under it, and when empty it shows a *placeholder* ("Explain this codebase")
+    that reads exactly like something the agent said. So a bare prompt glyph at
+    column zero counts as well.
+
+    Two things keep that from eating real content. It must be at the very
+    bottom, within TRAILING_LINES of the end, which is what separates an input
+    box from a dialog the agent is showing you. And the glyph must be the first
+    character on the line: a dialog offering "  \u276f 1. Resume from summary" is
+    indented, and it is the question, not the furniture.
+
+    A pane with nothing matching is left entirely alone, which is the right
+    answer for a harness whose furniture we have never seen -- it degrades to
+    the old behaviour rather than guessing.
     """
     lines = text.rstrip().split("\n")
     start = max(0, len(lines) - TRAILING_LINES)
-    rules = [index for index in range(start, len(lines)) if _is_rule(lines[index])]
-    if not rules:
+    found = [
+        index
+        for index in range(start, len(lines))
+        if _is_rule(lines[index]) or _is_prompt(lines[index])
+    ]
+    if not found:
         return text.rstrip()
 
-    # Walk up through the box: its rules are BOX_HEIGHT apart, and anything
-    # further back belongs to the agent's own output.
-    cut = rules[-1]
+    # Everything below the box must be chrome, which is always indented: a
+    # status bar, not a message. Codex echoes each previous user turn with the
+    # same chevron it draws its live box with, so without this an old echo
+    # sitting near the end takes the agent's newest message down with it.
+    anchor = found[-1]
+    if any(line and not line[0].isspace() for line in lines[anchor + 1 :]):
+        return text.rstrip()
+
+    # Walk up through the box: a bordered one has its rules BOX_HEIGHT apart,
+    # and anything further back belongs to the agent's own output.
+    cut = anchor
     while True:
-        above = [i for i in range(max(0, cut - BOX_HEIGHT), cut) if _is_rule(lines[i])]
+        above = [
+            i
+            for i in range(max(0, cut - BOX_HEIGHT), cut)
+            if _is_rule(lines[i]) or _is_prompt(lines[i])
+        ]
         if not above:
             break
         cut = above[0]
@@ -410,6 +478,17 @@ class Summariser:
     output -- box drawing, spinners, status lines and all -- is about 240 prompt
     tokens and summarises correctly. More context did not improve the answer."""
 
+    def _question(self, transcript: str) -> str:
+        """The user turn: the scrollback, and a pointer at the end of it."""
+        body = strip_input_box(transcript)[-self.max_chars :]
+        return (
+            f"Agent transcript (scrollback):\n---\n{body}\n---\n\n"
+            f"The agent's latest message ends here:\n---\n{last_message(body)}\n---\n"
+            "Summarise the agent's latest message. Use the scrollback above only "
+            "for context, and never describe a question from earlier in it -- "
+            "those were answered already."
+        )
+
     def _schema(self) -> dict[str, Any]:
         """The schema with the reply count bound to this deck's geometry."""
         responses = {**SCHEMA["properties"]["responses"], "maxItems": self.max_replies}
@@ -503,12 +582,7 @@ class Summariser:
 
         messages: list[dict[str, str]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": "Agent transcript:\n---\n"
-                + strip_input_box(transcript)[-self.max_chars :]
-                + "\n---",
-            },
+            {"role": "user", "content": self._question(transcript)},
         ]
 
         for attempt in range(1, max(1, self.attempts) + 1):

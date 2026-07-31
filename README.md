@@ -85,10 +85,17 @@ again, and not before: glancing at the deck and looking away shouldn't lose the
 one thing you came to read.
 
 The pane read is a screenshot of a terminal, so it ends with the harness's input
-box and status bar. Those are stripped before the model sees them, anchored on
-the box's rules rather than on a line count — a pane showing a *dialog* is drawn
-with rules too, and dropping its last few lines would remove the question being
-asked. A pane with no recognisable furniture is left alone.
+box and status bar — including whatever the harness has autocompleted, or the
+placeholder Codex shows in an empty box (`Explain this codebase`), both of which
+read exactly like something the agent said. Those are stripped first: a box is
+recognised by its rules or by a prompt glyph at column zero, and only counts if
+it sits at the bottom with nothing but indented chrome beneath it. A pane with
+no recognisable furniture is left alone.
+
+The scrollback is also sent with its closing block quoted back, because a
+transcript does not say which part is current — without that, a pane holding an
+old question above a newer answer got labelled with the question, and offered
+replies to something nobody was waiting on.
 
 Set `FIREWORKS_API_KEY` (environment or `.env`) to enable it; without a key the
 deck runs exactly as before. `--no-summaries` turns it off explicitly. Every
@@ -183,14 +190,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 312 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 318 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 306 run anywhere, and pin the protocol quirks documented
+XDG default); the other 312 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),
