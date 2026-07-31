@@ -29,6 +29,7 @@ from herdr_streamdeck.summary import (
     build,
     check,
     parse,
+    strip_input_box,
 )
 
 GOOD = {
@@ -517,3 +518,92 @@ def test_check_explains_each_rejection() -> None:
         summary, reason = check(payload)
         assert summary is None
         assert expected in reason, f"{payload!r} -> {reason!r}"
+
+
+# ---------------------------------------------------------- terminal chrome
+
+RULE = "─" * 96
+
+PROMPT_BOX = "\n".join(
+    [
+        "  I switched the serialiser to orjson and p99 fell to 95ms.",
+        "",
+        "✻ Brewed for 1m 7s",
+        "   ",
+        RULE,
+        "❯ set up kimi code pointed at fireworks",
+        RULE,
+        "   …/tas/herdr-streamdeck   main  ✱ Opus 5 ⣶  5h / 7d [⠀⠀⠀⠀⠀]",
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent",
+    ]
+)
+
+DIALOG = "\n".join(
+    [
+        "  This session is 12d 5h old and 180.5k tokens.",
+        RULE,
+        "  Resuming will consume a substantial portion of your usage limits.",
+        "",
+        "  ❯ 1. Resume from summary (recommended)",
+        "    2. Resume full session as-is",
+        "    3. Don't ask me again",
+        "",
+        "  Enter to confirm · Esc to cancel",
+    ]
+)
+
+
+def test_the_input_box_and_status_lines_are_removed() -> None:
+    """The pane read is a screenshot, so it ends with the harness rather than
+    with the agent. Summarising the tail described what the *user* was typing:
+    a pane whose box held "set up kimi code pointed at fireworks" was labelled
+    `Kimi→Fireworks direct path` instead of the agent's actual answer."""
+    kept = strip_input_box(PROMPT_BOX)
+    assert kept.endswith("✻ Brewed for 1m 7s")
+    assert "kimi" not in kept
+    assert "auto mode on" not in kept
+    assert "orjson" in kept, "the agent's own words survive"
+
+
+def test_a_dialog_is_left_alone() -> None:
+    """Drawn with rules too, but it is content -- the question being asked. It
+    is distinguished by having text *below* it rather than a status bar."""
+    assert strip_input_box(DIALOG) == DIALOG.rstrip()
+
+
+def test_a_transcript_with_no_furniture_is_untouched() -> None:
+    plain = "I refactored auth.\nAll 47 tests pass."
+    assert strip_input_box(plain) == plain
+
+
+def test_a_rule_in_the_agents_own_output_is_not_a_box() -> None:
+    """Only rules near the very end count, so a horizontal rule earlier in the
+    output is just text."""
+    body = f"before\n{RULE}\nafter\n" + "\n".join(f"line {n}" for n in range(8))
+    assert strip_input_box(body).endswith("line 7")
+
+
+def test_a_short_dash_run_is_not_a_rule() -> None:
+    """`---` in markdown must not read as the top of an input box."""
+    body = "some notes\n---\nmore notes"
+    assert strip_input_box(body) == body
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n\n\n", "one line"])
+def test_degenerate_transcripts_survive(text: str) -> None:
+    strip_input_box(text)
+
+
+async def test_the_summariser_strips_before_sending() -> None:
+    seen: list[dict[str, object]] = []
+
+    def send(body: bytes, timeout: float) -> bytes:
+        seen.append(json.loads(body))
+        return envelope(GOOD)
+
+    await Summariser(transport=send).summarise(PROMPT_BOX)
+    messages = seen[0]["messages"]
+    assert isinstance(messages, list)
+    sent = str(messages[1]["content"])
+    assert "kimi" not in sent
+    assert "orjson" in sent

@@ -84,6 +84,12 @@ A summary stays up once it appears. It is cleared when that agent starts working
 again, and not before: glancing at the deck and looking away shouldn't lose the
 one thing you came to read.
 
+The pane read is a screenshot of a terminal, so it ends with the harness's input
+box and status bar. Those are stripped before the model sees them, anchored on
+the box's rules rather than on a line count — a pane showing a *dialog* is drawn
+with rules too, and dropping its last few lines would remove the question being
+asked. A pane with no recognisable furniture is left alone.
+
 Set `FIREWORKS_API_KEY` (environment or `.env`) to enable it; without a key the
 deck runs exactly as before. `--no-summaries` turns it off explicitly. Every
 failure — timeout, rate limit, malformed response — degrades to no summary
@@ -177,14 +183,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 302 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 312 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 296 run anywhere, and pin the protocol quirks documented
+XDG default); the other 306 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),

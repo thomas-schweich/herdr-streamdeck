@@ -220,6 +220,77 @@ def _urllib_transport(api_key: str) -> Transport:
     return send
 
 
+RULE_CHARACTERS = frozenset(
+    "\u2500\u2501\u2504\u2505\u2508\u2509\u254c\u254d\u2550\u2015\u2014-=_"
+)
+"""Characters a terminal draws a horizontal rule out of."""
+
+RULE_MINIMUM = 30
+"""Shortest run that counts as a rule, in characters.
+
+Long enough that a markdown `---` in the agent's own output is not mistaken for
+the top of the input box."""
+
+TRAILING_LINES = 5
+"""How close to the very end the box's lower rule must be.
+
+This is what separates the input box from anything else drawn with rules. The
+box sits at the bottom of the screen with only a status line or two beneath it,
+whereas a dialog the agent is *showing* you has content below it. Without this,
+a pane offering "1. Resume from summary / 2. Resume as-is" had its question
+stripped as though it were furniture.
+"""
+
+BOX_HEIGHT = 3
+"""Greatest gap between two rules that still belong to the same box.
+
+A prompt box is rule / input / rule, so its rules are two lines apart."""
+
+
+def _is_rule(line: str) -> bool:
+    stripped = line.strip()
+    if len(stripped) < RULE_MINIMUM:
+        return False
+    return sum(character in RULE_CHARACTERS for character in stripped) / len(stripped) >= 0.9
+
+
+def strip_input_box(text: str) -> str:
+    """Drop the terminal's own furniture from the end of a transcript.
+
+    A pane read is a screenshot, so it ends with the harness's input box and
+    status bar rather than with the agent's words -- and the box contains
+    whatever the user is part-way through typing, plus any autocompletion the
+    harness has helpfully offered. Summarising that produced labels describing
+    the user's half-finished message instead of the agent's answer.
+
+    Anchored on the box's rules rather than on a line count. Claude Code draws
+    rule / input / rule and then two status lines, so "drop the last three
+    lines" nearly works -- but a pane showing a *dialog* has no input box, and
+    dropping its last three lines removes the question being asked.
+
+    Finding rules is not enough on its own either: a dialog is drawn with rules
+    too. What distinguishes the input box is that it sits at the *bottom*, with
+    only a status line or two under it, so only rules within TRAILING_LINES of
+    the end count. A pane with nothing matching is left entirely alone, which is
+    the right answer for a harness whose furniture we have never seen.
+    """
+    lines = text.rstrip().split("\n")
+    start = max(0, len(lines) - TRAILING_LINES)
+    rules = [index for index in range(start, len(lines)) if _is_rule(lines[index])]
+    if not rules:
+        return text.rstrip()
+
+    # Walk up through the box: its rules are BOX_HEIGHT apart, and anything
+    # further back belongs to the agent's own output.
+    cut = rules[-1]
+    while True:
+        above = [i for i in range(max(0, cut - BOX_HEIGHT), cut) if _is_rule(lines[i])]
+        if not above:
+            break
+        cut = above[0]
+    return "\n".join(lines[:cut]).rstrip()
+
+
 _NOT_IN_A_PHRASE = frozenset('{}[]"\\\n\r\t')
 """Characters that cannot occur in a label but do occur in leaked JSON.
 
@@ -434,7 +505,9 @@ class Summariser:
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": "Agent transcript:\n---\n" + transcript[-self.max_chars :] + "\n---",
+                "content": "Agent transcript:\n---\n"
+                + strip_input_box(transcript)[-self.max_chars :]
+                + "\n---",
             },
         ]
 
