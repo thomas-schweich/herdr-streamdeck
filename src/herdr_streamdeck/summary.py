@@ -316,14 +316,14 @@ def strip_input_box(text: str) -> str:
     that reads exactly like something the agent said. So a bare prompt glyph at
     column zero counts as well.
 
-    Three things keep that from eating real content. It must be within
+    Two things keep that from eating real content. It must be within
     TRAILING_LINES of the end, which is what separates an input box from a
-    dialog the agent is showing you. The glyph must be the first character on
-    the line: a dialog offering "  \u276f 1. Resume from summary" is indented, and
-    it is the question, not the furniture. And nothing below it may be
-    flush-left, which is what catches a pane that has no live box at all --
-    there the last chevron is an echo of an earlier turn, sitting above output
-    we must not discard.
+    dialog the agent is showing you. And the glyph must be the first character
+    on the line: a dialog offering "  \u276f 1. Resume from summary" is indented,
+    and it is the question, not the furniture.
+
+    A third check -- that nothing below the box is flush-left -- is belt only,
+    and is documented as such at the point it happens.
 
     A pane with nothing matching is left entirely alone, which is the right
     answer for a harness whose furniture we have never seen -- it degrades to
@@ -342,13 +342,17 @@ def strip_input_box(text: str) -> str:
     # Everything below the anchor must be chrome, which is always indented: a
     # status bar, not a message.
     #
-    # This matters when the pane does *not* end with an input box -- the agent
-    # is mid-reply, or the box has scrolled away. Codex echoes each previous
-    # user turn with the same chevron it draws its live box with, so the last
-    # chevron in the window is then an old echo with the newest output beneath
-    # it, and anchoring there would delete exactly what we came to read. When a
-    # live box *is* present it is the last candidate by construction, so where
-    # the echoes fall does not matter.
+    # Honestly: this has never fired. It changes the result on none of the
+    # panes sampled from either harness, and the case it was written for turned
+    # out not to exist -- both Claude Code and Codex keep the input box on
+    # screen for the whole time the agent is working, so the box is always the
+    # last candidate and echoes above it are irrelevant.
+    #
+    # It is kept because it is three lines and fails in the safe direction: a
+    # false positive means nothing is stripped, which is where we started. The
+    # one shape that could still produce it is a scrolled-back viewport, where
+    # the box is off screen and an earlier turn's chevron is the last one
+    # visible. Delete it the moment it gets in the way.
     anchor = found[-1]
     if any(line and not line[0].isspace() for line in lines[anchor + 1 :]):
         return text.rstrip()

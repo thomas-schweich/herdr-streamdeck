@@ -644,13 +644,13 @@ def test_an_empty_transcript_has_no_last_message(text: str) -> None:
 
 
 def test_an_echo_is_not_mistaken_for_a_live_box() -> None:
-    """When the pane has no input box up -- the agent is mid-reply, or it has
-    scrolled away -- the last chevron is an echo of an earlier user turn, with
-    the newest output below it. Anchoring there would delete what we came for.
+    """A transcript whose last chevron is an echo of an earlier user turn, with
+    newer output below it, must not be cut at the echo.
 
-    Note this is not about the echo being *near* the end: when a live box is
-    present it is the last candidate by construction, so echoes above it are
-    irrelevant. What identifies it is having nothing flush-left beneath.
+    This shape is synthetic. Both harnesses keep the input box on screen for
+    the whole time the agent is working, so in practice the box is always the
+    last candidate. Kept as a cheap guard whose failure direction is "strip
+    nothing", not as a description of anything observed.
     """
     kept = strip_input_box(SCROLLBACK)
     assert kept.rstrip().endswith("All 12 tests pass."), kept
