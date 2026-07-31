@@ -316,11 +316,14 @@ def strip_input_box(text: str) -> str:
     that reads exactly like something the agent said. So a bare prompt glyph at
     column zero counts as well.
 
-    Two things keep that from eating real content. It must be at the very
-    bottom, within TRAILING_LINES of the end, which is what separates an input
-    box from a dialog the agent is showing you. And the glyph must be the first
-    character on the line: a dialog offering "  \u276f 1. Resume from summary" is
-    indented, and it is the question, not the furniture.
+    Three things keep that from eating real content. It must be within
+    TRAILING_LINES of the end, which is what separates an input box from a
+    dialog the agent is showing you. The glyph must be the first character on
+    the line: a dialog offering "  \u276f 1. Resume from summary" is indented, and
+    it is the question, not the furniture. And nothing below it may be
+    flush-left, which is what catches a pane that has no live box at all --
+    there the last chevron is an echo of an earlier turn, sitting above output
+    we must not discard.
 
     A pane with nothing matching is left entirely alone, which is the right
     answer for a harness whose furniture we have never seen -- it degrades to
@@ -336,10 +339,16 @@ def strip_input_box(text: str) -> str:
     if not found:
         return text.rstrip()
 
-    # Everything below the box must be chrome, which is always indented: a
-    # status bar, not a message. Codex echoes each previous user turn with the
-    # same chevron it draws its live box with, so without this an old echo
-    # sitting near the end takes the agent's newest message down with it.
+    # Everything below the anchor must be chrome, which is always indented: a
+    # status bar, not a message.
+    #
+    # This matters when the pane does *not* end with an input box -- the agent
+    # is mid-reply, or the box has scrolled away. Codex echoes each previous
+    # user turn with the same chevron it draws its live box with, so the last
+    # chevron in the window is then an old echo with the newest output beneath
+    # it, and anchoring there would delete exactly what we came to read. When a
+    # live box *is* present it is the last candidate by construction, so where
+    # the echoes fall does not matter.
     anchor = found[-1]
     if any(line and not line[0].isspace() for line in lines[anchor + 1 :]):
         return text.rstrip()

@@ -643,6 +643,19 @@ def test_an_empty_transcript_has_no_last_message(text: str) -> None:
     assert last_message(text) == ""
 
 
+def test_an_echo_is_not_mistaken_for_a_live_box() -> None:
+    """When the pane has no input box up -- the agent is mid-reply, or it has
+    scrolled away -- the last chevron is an echo of an earlier user turn, with
+    the newest output below it. Anchoring there would delete what we came for.
+
+    Note this is not about the echo being *near* the end: when a live box is
+    present it is the last candidate by construction, so echoes above it are
+    irrelevant. What identifies it is having nothing flush-left beneath.
+    """
+    kept = strip_input_box(SCROLLBACK)
+    assert kept.rstrip().endswith("All 12 tests pass."), kept
+
+
 async def test_the_request_points_at_the_end_of_the_scrollback() -> None:
     """The scrollback alone does not say which part is current. A Codex pane
     holding an old "delete or deprecate?" above a newer "retry wrapper added"
