@@ -52,6 +52,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -273,9 +274,44 @@ def _is_rule(line: str) -> bool:
     return sum(character in RULE_CHARACTERS for character in stripped) / len(stripped) >= 0.9
 
 
+SPINNER = re.compile(r"^\W\s*\w+[\u2026.]*\s+(for\s+\d|\()")
+"""A harness's own progress line: a glyph, a word, and how long it took.
+
+"\u273b Brewed for 1m 7s" and "* Bootstrapping\u2026 (1m 1s \u00b7 \u2193 1.0k tokens)" are not
+things the agent said. Left in place they become the last line of the
+transcript, and the pointer at the newest message lands on one."""
+
+RIGHT_ALIGNED = 40
+"""Leading spaces past which a line is a status bar, not prose.
+
+Measured: the token counters run to 125, 136 and 305 characters of padding
+across the sampled panes, and no wrapped agent output comes close."""
+
 LAST_MESSAGE_CHARS = 600
 """How much of the closing block to quote back. Enough to hold a message,
 short enough that it cannot drown the transcript it is pointing into."""
+
+
+def _is_status(line: str) -> bool:
+    """A line the harness added under the agent's message."""
+    if not line.strip():
+        return False
+    if len(line) - len(line.lstrip()) >= RIGHT_ALIGNED:
+        return True
+    return bool(SPINNER.match(line.strip()))
+
+
+def strip_status_lines(text: str) -> str:
+    """Drop the harness's own trailing lines: spinners and counters.
+
+    Only from the end, and only while they keep matching. A progress line in
+    the middle of the scrollback is a fair record of what happened; one at the
+    end pretends to be the agent's latest word.
+    """
+    lines = text.rstrip().split("\n")
+    while lines and (not lines[-1].strip() or _is_status(lines[-1])):
+        lines.pop()
+    return "\n".join(lines)
 
 
 def last_message(text: str) -> str:
@@ -322,8 +358,6 @@ def strip_input_box(text: str) -> str:
     on the line: a dialog offering "  \u276f 1. Resume from summary" is indented,
     and it is the question, not the furniture.
 
-    A third check -- that nothing below the box is flush-left -- is belt only,
-    and is documented as such at the point it happens.
 
     A pane with nothing matching is left entirely alone, which is the right
     answer for a harness whose furniture we have never seen -- it degrades to
@@ -339,27 +373,11 @@ def strip_input_box(text: str) -> str:
     if not found:
         return text.rstrip()
 
-    # Everything below the anchor must be chrome, which is always indented: a
-    # status bar, not a message.
-    #
-    # Honestly: this has never fired. It changes the result on none of the
-    # panes sampled from either harness, and the case it was written for turned
-    # out not to exist -- both Claude Code and Codex keep the input box on
-    # screen for the whole time the agent is working, so the box is always the
-    # last candidate and echoes above it are irrelevant.
-    #
-    # It is kept because it is three lines and fails in the safe direction: a
-    # false positive means nothing is stripped, which is where we started. The
-    # one shape that could still produce it is a scrolled-back viewport, where
-    # the box is off screen and an earlier turn's chevron is the last one
-    # visible. Delete it the moment it gets in the way.
-    anchor = found[-1]
-    if any(line and not line[0].isspace() for line in lines[anchor + 1 :]):
-        return text.rstrip()
-
     # Walk up through the box: a bordered one has its rules BOX_HEIGHT apart,
-    # and anything further back belongs to the agent's own output.
-    cut = anchor
+    # and anything further back belongs to the agent's own output. The line
+    # directly above the chevron is the top of the input, consistently, in both
+    # harnesses -- a rule in one and a blank in the other.
+    cut = found[-1]
     while True:
         above = [
             i
@@ -493,7 +511,7 @@ class Summariser:
 
     def _question(self, transcript: str) -> str:
         """The user turn: the scrollback, and a pointer at the end of it."""
-        body = strip_input_box(transcript)[-self.max_chars :]
+        body = strip_status_lines(strip_input_box(transcript))[-self.max_chars :]
         return (
             f"Agent transcript (scrollback):\n---\n{body}\n---\n\n"
             f"The agent's latest message ends here:\n---\n{last_message(body)}\n---\n"

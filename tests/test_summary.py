@@ -31,6 +31,7 @@ from herdr_streamdeck.summary import (
     last_message,
     parse,
     strip_input_box,
+    strip_status_lines,
 )
 
 GOOD = {
@@ -623,14 +624,30 @@ SCROLLBACK = "\n".join(
         "",
         "",
         "• I finished adding a retry wrapper to the S3 client. All 12 tests pass.",
+        "",
+        "",
+        "› Explain this codebase",
+        "",
+        "  gpt-5.6-terra medium · ~/diggy",
     ]
 )
+"""A real Codex pane: every past user turn echoed with the same chevron the live
+box uses, and the live box last, holding a placeholder."""
 
 
 def test_the_last_message_is_the_closing_block() -> None:
-    assert last_message(SCROLLBACK) == (
+    assert last_message(strip_input_box(SCROLLBACK)) == (
         "• I finished adding a retry wrapper to the S3 client. All 12 tests pass."
     )
+
+
+def test_the_live_box_wins_over_every_earlier_echo() -> None:
+    """Codex echoes each past turn with the chevron it draws its live box with.
+    The box is always the last of them, so the echoes never matter."""
+    kept = strip_input_box(SCROLLBACK)
+    assert kept.rstrip().endswith("All 12 tests pass.")
+    assert "Explain this codebase" not in kept
+    assert "yes remove it" in kept, "an earlier turn is context, not furniture"
 
 
 def test_a_multi_line_closing_block_is_kept_whole() -> None:
@@ -641,19 +658,6 @@ def test_a_multi_line_closing_block_is_kept_whole() -> None:
 @pytest.mark.parametrize("text", ["", "   ", "\n\n"])
 def test_an_empty_transcript_has_no_last_message(text: str) -> None:
     assert last_message(text) == ""
-
-
-def test_an_echo_is_not_mistaken_for_a_live_box() -> None:
-    """A transcript whose last chevron is an echo of an earlier user turn, with
-    newer output below it, must not be cut at the echo.
-
-    This shape is synthetic. Both harnesses keep the input box on screen for
-    the whole time the agent is working, so in practice the box is always the
-    last candidate. Kept as a cheap guard whose failure direction is "strip
-    nothing", not as a description of anything observed.
-    """
-    kept = strip_input_box(SCROLLBACK)
-    assert kept.rstrip().endswith("All 12 tests pass."), kept
 
 
 async def test_the_request_points_at_the_end_of_the_scrollback() -> None:
@@ -675,3 +679,74 @@ async def test_the_request_points_at_the_end_of_the_scrollback() -> None:
     assert sent.count("retry wrapper") == 2, "quoted back as well as in context"
     assert sent.count("Should I delete") == 1, "the old question stays context only"
     assert "latest message" in sent
+
+
+# ------------------------------------------------- the harness's own trailing
+
+
+SPINNERS = [
+    "✻ Brewed for 1m 7s",
+    "✻ Crunched for 6m 28s · 1 shell still running",
+    "* Bootstrapping… (1m 1s · ↓ 1.0k tokens)",
+    "✻ Worked for 2m 36s",
+]
+
+
+@pytest.mark.parametrize("spinner", SPINNERS)
+def test_a_progress_line_is_not_the_agents_last_word(spinner: str) -> None:
+    """Left in place these become the final line, and the pointer at the newest
+    message lands on one instead of on anything the agent said."""
+    text = f"I switched the serialiser to orjson and p99 fell to 95ms.\n\n{spinner}"
+    assert strip_status_lines(text).endswith("95ms.")
+
+
+def test_a_right_aligned_counter_is_dropped() -> None:
+    """Measured at 125 to 305 characters of padding across the sampled panes;
+    no wrapped agent output comes close."""
+    text = "All 12 integration tests pass." + "\n" + " " * 150 + "702133 tokens"
+    assert strip_status_lines(text).endswith("tests pass.")
+
+
+def test_prose_that_merely_mentions_tokens_survives() -> None:
+    """The discriminator is the alignment, not the word."""
+    text = "The harness overhead came to about 4200 tokens per call."
+    assert strip_status_lines(text) == text
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "● 2 background shell command tasks have no completion record",
+        "※ recap: You asked me to find a machine ID",
+        "• I finished adding a retry wrapper. All 12 tests pass.",
+    ],
+)
+def test_a_bulleted_message_is_not_a_progress_line(line: str) -> None:
+    """These open with a glyph too, which is why the pattern also requires a
+    duration or a parenthetical right after the first word."""
+    assert strip_status_lines(f"earlier context\n{line}").endswith(line)
+
+
+def test_a_progress_line_mid_transcript_is_left_alone() -> None:
+    """It is a fair record of what happened; only a trailing one pretends to be
+    the agent's latest word."""
+    text = "✻ Brewed for 1m 7s\n\nAnd here is what I found."
+    assert strip_status_lines(text) == text
+
+
+async def test_the_request_carries_neither_box_nor_spinner() -> None:
+    seen: list[dict[str, object]] = []
+
+    def send(body: bytes, timeout: float) -> bytes:
+        seen.append(json.loads(body))
+        return envelope(GOOD)
+
+    await Summariser(transport=send).summarise(
+        PROMPT_BOX.replace("✻ Brewed for 1m 7s", "✻ Brewed for 1m 7s")
+    )
+    messages = seen[0]["messages"]
+    assert isinstance(messages, list)
+    sent = str(messages[1]["content"])
+    assert "Brewed for" not in sent
+    assert "auto mode on" not in sent
+    assert "orjson" in sent

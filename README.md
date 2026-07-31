@@ -89,8 +89,10 @@ box and status bar — including whatever the harness has autocompleted, or the
 placeholder Codex shows in an empty box (`Explain this codebase`), both of which
 read exactly like something the agent said. Those are stripped first: a box is
 recognised by its rules or by a prompt glyph at column zero, and only counts if
-it sits at the bottom with nothing but indented chrome beneath it. A pane with
-no recognisable furniture is left alone.
+it sits within a few lines of the end. The harness's own trailing lines go too —
+progress spinners (`✻ Brewed for 1m 7s`) and right-aligned token counters — since
+those are not the agent's words either, and left in place they become the last
+line of the transcript. A pane with no recognisable furniture is left alone.
 
 The scrollback is also sent with its closing block quoted back, because a
 transcript does not say which part is current — without that, a pane holding an
@@ -190,14 +192,14 @@ through to it.
 ## Development
 
 ```bash
-uv run pytest        # 318 tests; herdr-dependent ones skip when no socket
+uv run pytest        # 330 tests; herdr-dependent ones skip when no socket
 uv run mypy          # strict; no suppressions in our own code
 uv run ruff check .
 ```
 
 Tests run without hardware or herdr. The 6 tests in `tests/test_integration.py`
 skip themselves unless a live server is reachable at `HERDR_SOCKET_PATH` (or the
-XDG default); the other 312 run anywhere, and pin the protocol quirks documented
+XDG default); the other 324 run anywhere, and pin the protocol quirks documented
 below.
 
 CI additionally covers what this machine cannot: macOS (the primary target),
