@@ -750,3 +750,11 @@ async def test_the_request_carries_neither_box_nor_spinner() -> None:
     assert "Brewed for" not in sent
     assert "auto mode on" not in sent
     assert "orjson" in sent
+
+
+@pytest.mark.parametrize("empty", ["...", "…", "---", "  .  ", "???", "42"])
+def test_a_label_with_no_letters_is_rejected(empty: str) -> None:
+    """gpt-oss on the raw completions endpoint answered "..." with replies of
+    ["..."] on five of six real panes. It conformed to the schema perfectly and
+    would have gone straight to a key: conformance is not usefulness."""
+    assert parse({**GOOD, "summary": empty}) is None

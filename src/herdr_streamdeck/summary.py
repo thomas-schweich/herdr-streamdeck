@@ -423,6 +423,12 @@ def _phrase(value: object) -> str | None:
         return None
     if _NOT_IN_A_PHRASE & set(phrase):
         return None
+    # A label with no letters in it is not a label. gpt-oss on the raw
+    # completions endpoint answered "..." with replies of ["..."] on five of
+    # six real panes -- structurally perfect, and it would have gone straight to
+    # a key. Conformance was never the same thing as usefulness.
+    if not any(character.isalpha() for character in phrase):
+        return None
     if len(phrase.split()) > MAX_PHRASE_WORDS or len(phrase) > MAX_PHRASE_CHARS:
         return None
     return phrase
