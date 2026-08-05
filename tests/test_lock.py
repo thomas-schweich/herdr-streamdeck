@@ -155,10 +155,22 @@ def test_ioreg_really_runs_on_a_mac() -> None:
 
     Everything else here tests the parsing against captured output. This tests
     the invocation -- that ``ioreg`` is on PATH, accepts these flags and exits
-    zero -- which is what decides whether the watcher is available at all. It
-    cannot assert the lock state: CI runners have no console session, so the
-    key is simply absent there.
+    zero -- which is what decides whether the watcher is available at all.
+
+    It deliberately asserts nothing about the *content*. A CI runner has no
+    console session and never locks, so the only machine that can confirm a
+    real transition is a Mac someone is sitting at.
     """
-    output = lock_module.read_ioreg()
-    assert "IOConsoleUsers" in output, "the console session record is missing"
+    lock_module.read_ioreg()
     assert ScreenLock().available
+
+
+def test_the_filter_key_is_one_root_actually_has() -> None:
+    """Guards the trap this command already fell into once.
+
+    ``-k`` matches an object's own properties. Asking for the lock flag itself
+    matches nothing, prints a bare Root line, and reads as permanently
+    unlocked -- silently, which is the worst way for this to fail.
+    """
+    assert "IOConsoleUsers" in lock_module.IOREG
+    assert "CGSSessionScreenIsLocked" not in lock_module.IOREG

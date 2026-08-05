@@ -24,10 +24,15 @@ POLL_SECONDS = 0.5
 """How often to ask. The interval is the exposure window after locking, so it
 wants to be short; ``ioreg`` measured well under the budget at twice a second."""
 
-IOREG = ("ioreg", "-n", "Root", "-d1", "-k", "CGSSessionScreenIsLocked")
-"""The console session's own record of itself. ``-k`` narrows the dump to the
-one property, which keeps the output to a few lines instead of the whole
-Root subtree."""
+IOREG = ("ioreg", "-n", "Root", "-d1", "-k", "IOConsoleUsers")
+"""Root's record of the console sessions, dumped whole.
+
+Filtered on ``IOConsoleUsers`` and not on ``CGSSessionScreenIsLocked``, which
+is the obvious choice and the wrong one: ``-k`` matches an object's *own*
+properties, and the lock flag is not one -- it lives inside a dict inside the
+``IOConsoleUsers`` array. Asking for it directly matches nothing and prints a
+bare ``+-o Root`` line with no properties at all, which parses as "never
+locked" forever. ``-d1`` then prints the array in full, flag and all."""
 
 LOCKED = re.compile(r'"CGSSessionScreenIsLocked"\s*=\s*Yes')
 """The key is present and Yes only while the screen is locked, and absent

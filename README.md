@@ -117,9 +117,12 @@ Dimming alone leaves the summaries sitting in the deck's own key buffers, where
 anything that puts the brightness back — another program, a crash and a fresh
 daemon, the deck's power-on default — puts them back on screen too.
 
-Lock state comes from `CGSSessionScreenIsLocked` in the IORegistry, read with
-`ioreg`, so this needs no extra dependency. It is polled twice a second, which
-is also the exposure window after locking. If `ioreg` cannot be run at all the
+Lock state comes from `CGSSessionScreenIsLocked`, which sits inside Root's
+`IOConsoleUsers` in the IORegistry, read with `ioreg` — so this needs no extra
+dependency. It is polled twice a second, which is also the exposure window
+after locking. Note that `ioreg -k` filters on an object's *own* properties, so
+the filter is `IOConsoleUsers`; asking for the lock flag directly matches
+nothing and reads as permanently unlocked. If `ioreg` cannot be run at all the
 daemon says so and carries on lit, rather than blanking forever for a reason
 nobody can see; if it stops working after having worked, the deck blanks,
 because the safe reading of "I cannot tell" is the one that hides the
