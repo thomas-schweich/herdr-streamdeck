@@ -296,6 +296,15 @@ class ButtonSurface(Protocol):
         """Try to reacquire the device. False if it is still absent."""
         ...
 
+    @property
+    def brightness(self) -> int:
+        """The percentage the deck runs at when it is showing anything."""
+        ...
+
+    def set_brightness(self, percent: int) -> None:
+        """Backlight level. Zero turns the panel off outright."""
+        ...
+
 
 @dataclass
 class NullSurface:
@@ -313,6 +322,12 @@ class NullSurface:
 
     writes: int = 0
     opened: bool = False
+    brightness_: int = 60
+    """The level the deck runs at, and what it is restored to."""
+
+    brightness_written: int = 60
+    """Last value actually written. Zero is how a test sees a blanked deck."""
+
     _handler: PressHandler | None = None
 
     @property
@@ -340,6 +355,13 @@ class NullSurface:
     def reopen(self) -> bool:
         self.opened = True
         return True
+
+    @property
+    def brightness(self) -> int:
+        return self.brightness_
+
+    def set_brightness(self, percent: int) -> None:
+        self.brightness_written = percent
 
     @property
     def levels(self) -> int:
@@ -492,6 +514,21 @@ class StreamDeckSurface:
         except Exception:
             return False
         return True
+
+    @property
+    def brightness(self) -> int:
+        return self._brightness
+
+    def set_brightness(self, percent: int) -> None:
+        deck = self._deck
+        if deck is None:
+            raise DeckDisconnected("deck is not open")
+        with self._lock:
+            try:
+                deck.set_brightness(percent)
+            except Exception as exc:
+                self._drop()
+                raise DeckDisconnected(str(exc)) from exc
 
     def set_press_handler(self, handler: PressHandler | None) -> None:
         self._handler = handler

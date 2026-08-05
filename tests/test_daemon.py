@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from herdr_streamdeck.daemon import (
     worth_summarising,
 )
 from herdr_streamdeck.deck import (
+    EMPTY_BACKGROUND,
     ButtonFace,
     DeckDisconnected,
     KeyFrames,
@@ -1034,6 +1036,11 @@ class FlakySurface(NullSurface):
             raise DeckDisconnected("gone")
         return super().render(face)
 
+    def set_brightness(self, percent: int) -> None:
+        if not self.plugged:
+            raise DeckDisconnected("gone")
+        super().set_brightness(percent)
+
     def reopen(self) -> bool:
         self.reopen_attempts += 1
         return self.plugged
@@ -1156,3 +1163,157 @@ async def test_the_reply_menu_does_not_survive_a_disconnect() -> None:
     force_writes(controller)
     controller.tick(now=1.0)
     assert controller._menu is None
+
+
+# ------------------------------------------------------------------ screen lock
+
+
+async def test_locking_blacks_the_keys_before_killing_the_backlight() -> None:
+    """Dimming alone would leave the summaries in the deck's own buffers."""
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1", title="deploy")]}
+    controller, surface, _ = make_controller(snapshot=snapshot)
+    await controller.prime()
+    assert surface.faces[0].badge == "deploy"
+
+    controller.set_locked(True)
+
+    assert all(
+        face == ButtonFace(background=EMPTY_BACKGROUND) for face in surface.faces.values()
+    ), "every key, not just the occupied ones"
+    assert len(surface.faces) == surface.key_count
+    assert surface.brightness_written == 0
+
+
+async def test_unlocking_puts_the_panes_back() -> None:
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1", title="deploy")]}
+    controller, surface, _ = make_controller(snapshot=snapshot)
+    await controller.prime()
+
+    controller.set_locked(True)
+    controller.set_locked(False)
+
+    assert surface.brightness_written == surface.brightness
+    assert surface.faces[0].badge == "deploy"
+
+
+async def test_a_locked_deck_does_not_repaint() -> None:
+    """Otherwise a status change while you are away relights the keys."""
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
+    controller, surface, _ = make_controller(snapshot=snapshot)
+    await controller.prime()
+    controller.set_locked(True)
+    blanked = surface.writes
+
+    controller._upsert(pane_record("w1:p1", agent_status="blocked"))
+    controller.repaint()
+    controller._shown.clear()
+    controller.tick(now=1.0)
+
+    assert surface.writes == blanked, "nothing reaches the deck while locked"
+    assert all(
+        face == ButtonFace(background=EMPTY_BACKGROUND) for face in surface.faces.values()
+    )
+
+
+async def test_a_locked_deck_ignores_presses() -> None:
+    """A dark deck is still a live one; a bag on it must not answer an agent."""
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
+    controller, surface, client = make_controller(snapshot=snapshot)
+    controller._loop = asyncio.get_running_loop()
+    await controller.prime()
+    before = len(client.requests)
+
+    controller.set_locked(True)
+    surface.tap(0)
+    await asyncio.sleep(0)
+
+    assert len(client.requests) == before, "the press went nowhere"
+
+
+async def test_locking_abandons_a_reply_menu() -> None:
+    """Coming back to a half-made choice invites finishing it by reflex."""
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
+    controller, _, _ = make_controller(snapshot=snapshot)
+    await controller.prime()
+    controller._menu = ReplyMenu(pane_id="w1:p1", replies=(Reply("proceed", "go", "go ahead"),))
+
+    controller.set_locked(True)
+
+    assert controller._menu is None
+
+
+async def test_a_deck_that_returns_mid_lock_comes_back_dark() -> None:
+    """open() resets the deck to full brightness, so the lock is reapplied.
+
+    Waiting for the next lock transition would not do: there may not be one
+    until the screen is unlocked, which is exactly when it is too late.
+    """
+    import herdr_streamdeck.daemon as daemon
+
+    controller, surface = await flaky()
+    surface.plugged = False
+    force_writes(controller)
+    controller.tick(now=1.0)
+    assert controller._reconnect_task is not None, "the loss was noticed"
+
+    # The screen locks while the deck is away, so there is nothing to blank yet.
+    controller.set_locked(True)
+
+    original = daemon.RECONNECT_SECONDS
+    daemon.RECONNECT_SECONDS = 0.01
+    try:
+        surface.plugged = True
+        await asyncio.sleep(0.15)
+    finally:
+        daemon.RECONNECT_SECONDS = original
+
+    assert controller._connected
+    assert surface.brightness_written == 0
+    assert all(
+        face == ButtonFace(background=EMPTY_BACKGROUND) for face in surface.faces.values()
+    )
+
+
+async def test_a_deck_lost_while_locked_is_noticed_at_unlock() -> None:
+    """Nothing writes while locked, so the loss goes unseen until it does.
+
+    Harmless rather than ideal: a deck that comes back mid-lock comes back
+    blank, because opening it resets the key images. Unlocking is what
+    discovers the gap, and the reconnect loop closes it from there.
+    """
+    controller, surface = await flaky()
+    controller.set_locked(True)
+    surface.plugged = False
+
+    controller.set_locked(False)
+
+    assert not controller._connected, "restoring the backlight found the gap"
+    assert controller._reconnect_task is not None
+
+
+async def test_the_lock_loop_follows_the_watcher() -> None:
+    state = {"locked": False}
+
+    class Watcher:
+        def locked(self) -> bool:
+            return state["locked"]
+
+    snapshot: JSONObject = {"panes": [pane_record("w1:p1")]}
+    client = StubClient(snapshot)
+    surface = NullSurface(key_count_=15, key_layout_=(3, 5))
+    controller = DeckController(client, surface, lock=Watcher(), lock_interval=0.01)
+    controller._loop = asyncio.get_running_loop()
+    await controller.prime()
+
+    task = asyncio.create_task(controller._lock_loop())
+    try:
+        state["locked"] = True
+        await asyncio.sleep(0.05)
+        assert surface.brightness_written == 0
+        state["locked"] = False
+        await asyncio.sleep(0.05)
+        assert surface.brightness_written == surface.brightness
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

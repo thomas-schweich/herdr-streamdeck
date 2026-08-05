@@ -104,6 +104,28 @@ deck runs exactly as before. `--no-summaries` turns it off explicitly. Every
 failure — timeout, rate limit, malformed response — degrades to no summary
 rather than a wrong one, and nothing blocks the display on the network.
 
+### The deck goes dark with the screen
+
+The summaries are the agents' own words, which is exactly the content a lock
+screen exists to hide. On macOS the daemon follows the lock state and, while it
+holds, blacks out every key, turns the backlight off and ignores presses — a
+dark deck is still a live one, and a bag set down on it should not answer an
+agent on your behalf. Unlocking restores the display.
+
+The order matters: the keys are written black *before* the backlight drops.
+Dimming alone leaves the summaries sitting in the deck's own key buffers, where
+anything that puts the brightness back — another program, a crash and a fresh
+daemon, the deck's power-on default — puts them back on screen too.
+
+Lock state comes from `CGSSessionScreenIsLocked` in the IORegistry, read with
+`ioreg`, so this needs no extra dependency. It is polled twice a second, which
+is also the exposure window after locking. If `ioreg` cannot be run at all the
+daemon says so and carries on lit, rather than blanking forever for a reason
+nobody can see; if it stops working after having worked, the deck blanks,
+because the safe reading of "I cannot tell" is the one that hides the
+summaries. `--no-screen-lock` opts out. No other platform publishes a single
+lock state to follow, so nothing changes off macOS.
+
 The model and its settings were chosen by measurement, not preference; see the
 module docstring in `summary.py` for the bake-off. Suggested replies come back
 with each summary and are stored, but nothing sends them yet — committing text

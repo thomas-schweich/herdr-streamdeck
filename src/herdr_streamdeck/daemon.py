@@ -52,6 +52,7 @@ from .deck import (
 from .icons import mark_for, resolve_override
 from .instance import AlreadyRunning, SingleInstance, lock_path, stop_running
 from .layout import Grid, Group, GroupingMode, GroupKey, Pane, build_columns
+from .lock import POLL_SECONDS, LockWatcher, NoLock, lock_watcher
 from .protocol import Event, HerdrError, JSONObject, subscription
 from .summary import PaneSummary, Reply, Summariser
 from .summary import build as build_summariser
@@ -252,10 +253,15 @@ class DeckController:
         mode: GroupingMode = GroupingMode.WORKSPACE,
         reconcile_interval: float = 60.0,
         summariser: Summariser | None = None,
+        lock: LockWatcher | None = None,
+        lock_interval: float = POLL_SECONDS,
     ) -> None:
         self._client = client
         self._surface = surface
         self._mode = mode
+        self._lock = lock or NoLock()
+        self._lock_interval = lock_interval
+        self._locked = False
         self._summariser = summariser
         self._summaries: dict[str, PaneSummary] = {}
         self._summarising: set[str] = set()
@@ -346,7 +352,7 @@ class DeckController:
         animation is running.
         """
         self._rebuild_columns()
-        if not self._connected:
+        if not self._connected or self._locked:
             # The model stays current so the deck is right the moment it
             # returns; there is just nothing to draw on.
             return
@@ -387,7 +393,7 @@ class DeckController:
         1.34 ms, so a full 15-key refresh is 25 ms and blind rewriting would
         cap the deck at ~40 fps for no benefit. Returns the number of writes.
         """
-        if not self._connected:
+        if not self._connected or self._locked:
             return 0
         if now is None:
             loop = self._loop
@@ -506,12 +512,93 @@ class DeckController:
             self._frames.clear()
             self._shown.clear()
             self._surface.set_press_handler(self._on_press)
-            self.repaint()
+            # A deck that comes back mid-lock comes back at full brightness
+            # showing whatever open() drew, so the lock has to be reapplied
+            # rather than waiting for the next transition -- there may not be
+            # one until the screen is unlocked.
+            if self._locked:
+                self._blank()
+            else:
+                self.repaint()
+
+    # ------------------------------------------------------------------ locking
+
+    async def _lock_loop(self) -> None:
+        """Follow the screen lock, keeping the deck dark for as long as it holds."""
+        while True:
+            await asyncio.sleep(self._lock_interval)
+            try:
+                locked = await asyncio.to_thread(self._lock.locked)
+            except Exception:
+                # ScreenLock decides for itself what an unreadable state means;
+                # anything that still escapes is a bug in the watcher, and
+                # tearing down the deck over it would be the wrong answer.
+                logger.debug("lock check failed", exc_info=True)
+                continue
+            if locked != self._locked:
+                self.set_locked(locked)
+
+    def set_locked(self, locked: bool) -> None:
+        """Take the deck dark, or bring it back."""
+        self._locked = locked
+        if locked:
+            logger.info("screen locked; blanking the deck")
+            # You walked away mid-choice. Coming back to a half-made decision
+            # still sitting on the keys invites finishing it by reflex.
+            self._menu = None
+            self._holding = None
+            if self._hold_task is not None:
+                self._hold_task.cancel()
+                self._hold_task = None
+            self._blank()
+        else:
+            logger.info("screen unlocked; restoring the deck")
+            self._restore()
+
+    def _blank(self) -> None:
+        """Black out every key, then kill the backlight.
+
+        In that order, and the order is the whole point. Dimming alone leaves
+        the summaries sitting in the deck's own key buffers, where anything
+        that puts the brightness back -- another program, a crash and a fresh
+        daemon, the deck's power-on default -- puts them back on screen too.
+        Writing black first means there is nothing left to reveal.
+        """
+        if not self._connected:
+            return
+        try:
+            frames = self._surface.render(ButtonFace(background=EMPTY_BACKGROUND))
+            for index in range(self._surface.key_count):
+                self._surface.write(index, frames, self._surface.levels - 1)
+            self._surface.set_brightness(0)
+        except DeckDisconnected:
+            self._note_disconnect()
+            return
+        except Exception:
+            logger.warning("could not blank the deck", exc_info=True)
+            return
+        # Every key now shows something other than what these levels claim, so
+        # the next tick has to write rather than skip.
+        self._shown.clear()
+
+    def _restore(self) -> None:
+        if not self._connected:
+            return
+        try:
+            self._surface.set_brightness(self._surface.brightness)
+        except DeckDisconnected:
+            self._note_disconnect()
+            return
+        self.repaint()
 
     # ------------------------------------------------------------------ presses
 
     def _on_press(self, index: int, pressed: bool) -> None:
         """Invoked on the deck's reader thread -- hop to the event loop."""
+        if self._locked:
+            # A dark deck is still a live one. Without this, a bag set down on
+            # it while you are away sends a canned reply into a running agent.
+            return
         loop = self._loop
         if loop is None:
             # Only reachable if a press arrives before run() starts. Logged
@@ -833,6 +920,7 @@ class DeckController:
         painter = asyncio.create_task(self._paint_loop(), name="painter")
         animator = asyncio.create_task(self._animate_loop(), name="animator")
         reconciler = asyncio.create_task(self._reconcile_loop(), name="reconciler")
+        locker = asyncio.create_task(self._lock_loop(), name="locker")
         try:
             async for event in self._client.events():
                 self.handle(event)
@@ -845,7 +933,7 @@ class DeckController:
             # self-reaping.
             logger.info("event stream closed; herdr is gone, shutting down")
         finally:
-            for task in (painter, animator, reconciler, self._reconnect_task):
+            for task in (painter, animator, reconciler, locker, self._reconnect_task):
                 if task is None:
                     continue
                 task.cancel()
@@ -1013,7 +1101,11 @@ async def amain(argv: list[str] | None = None) -> int:
     await client.connect()
 
     controller = DeckController(
-        client, surface, mode=GroupingMode(args.mode), summariser=summariser
+        client,
+        surface,
+        mode=GroupingMode(args.mode),
+        summariser=summariser,
+        lock=lock_watcher(enabled=not args.no_screen_lock),
     )
 
     stop = asyncio.Event()
@@ -1064,6 +1156,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "skip the three-word pane summaries even if a key is configured. "
             "They are already skipped when FIREWORKS_API_KEY is absent"
+        ),
+    )
+    parser.add_argument(
+        "--no-screen-lock",
+        action="store_true",
+        help=(
+            "keep the deck lit while the screen is locked. On macOS the deck is "
+            "blanked and its backlight turned off for as long as the screen is "
+            "locked, because the summaries are the agents' own words. No other "
+            "platform publishes a lock state to follow, so this changes nothing "
+            "off macOS"
         ),
     )
     parser.add_argument(
